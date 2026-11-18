@@ -7,7 +7,7 @@ or **added**. Every release names the commit a consumer pins
 
 ## 0.1.0 — contract 0.1
 
-Commit to pin: `<filled in at tag time: the 40 hex digits of the v0.1.0 commit>`
+Commit to pin: `4e2dd8325b54ce652bf4884fd85da602b14ae726` (tag `v0.1.0`)
 
 The contract as unemupc's PC core and desktop front end use it, moved
 unchanged into its own repository.

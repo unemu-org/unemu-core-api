@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 [package]
 name = "unemu-core-api"
-# The package version is the contract's: 0.1.0 is CONTRACT 0.1 (docs/versioning.md).
-version = "0.1.0"
+# The package version is the contract's: 0.2.0 is CONTRACT 0.2 (docs/versioning.md).
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.99"
 license = "MIT OR Apache-2.0"
@@ -16,6 +16,11 @@ publish = false
 
 # No dependencies of any kind, also none for tests: nothing in the contract
 # may force a version of another crate on a core.
+
+[features]
+# A storage and content in memory (`test_support`), for the tests of cores
+# and front ends. No dependency comes with it.
+test-support = []
 
 # The root package is also a workspace, so a second member can join later
 # without moving this one.

@@ -49,24 +49,51 @@ pub trait Machine {
     /// front end runs again while it is short. Otherwise a run never returns
     /// before a limit without an event. A guest-requested reset is not an
     /// event: the core performs it inside the run and reports it as a
-    /// [`Message`]. Fails with [`crate::ErrorKind::Guest`] when the emulated
-    /// machine cannot continue and with [`crate::ErrorKind::Storage`] when a
-    /// host write failed; either leaves the status [`Status::Failed`],
-    /// except that a `Storage` failure while the guest halts (making its
-    /// writes durable) may leave the status [`Status::Halted`], so the
-    /// session can still be finished. `limit.stop_on_frame` on a machine
-    /// whose features do not list [`crate::Features::frame_stops`] fails
-    /// with [`crate::ErrorKind::Unsupported`].
+    /// [`Message`]. `limit.stop_on_frame` on a machine whose features do
+    /// not list [`crate::Features::frame_stops`] fails with
+    /// [`crate::ErrorKind::Unsupported`].
+    ///
+    /// A run fails, leaving the status [`Status::Failed`], with:
+    ///
+    /// - [`crate::ErrorKind::Guest`] when the emulated machine cannot
+    ///   continue;
+    /// - [`crate::ErrorKind::Storage`] when a host read or write of the
+    ///   machine's storage failed, such as a record that could not be
+    ///   opened when a medium was inserted;
+    /// - [`crate::ErrorKind::StorageUncertain`] when a host write failed
+    ///   with an unknown outcome;
+    /// - [`crate::ErrorKind::Content`] when a [`crate::ContentReader`]
+    ///   reported that its bytes are no longer the verified ones.
+    ///
+    /// A `Storage` or `StorageUncertain` failure while the guest halts
+    /// (making its writes durable) may leave the status [`Status::Halted`]
+    /// instead, so the session can still be finished. Whatever was durable
+    /// stays durable; after an uncertain commit the record holds the old or
+    /// the new contents, whole. The front end retries by dropping the
+    /// machine and creating it again.
     fn run(&mut self, limit: RunLimit) -> Result<Stop, Error>;
 
     /// The picture of a display at the last completed boundary.
     ///
-    /// After an error the last picture stays readable. The borrow ends
-    /// before the next call on the machine.
+    /// A machine that draws its picture line by line returns the last
+    /// picture it finished, never one it is still drawing, so a front end
+    /// that runs by deadline shows whole frames without
+    /// [`RunLimit::stop_on_frame`]. After an error the last picture stays
+    /// readable. The borrow ends before the next call on the machine.
     fn frame(&mut self, display: DisplayId) -> Result<Frame<'_>, Error>;
 
     /// Move the sound rendered up to `now()` since the last call to the end
     /// of `out`, at `description().audio` rate.
+    ///
+    /// The sound keeps its place in virtual time, where `rate` is the audio
+    /// rate and `clock` is `description().clock`. Frame `i` is the sound at virtual time `i × clock / rate` ticks
+    /// from creation. At every return of [`Machine::run`], once `drain_audio`
+    /// has been called, the next frame it will hand over has index
+    /// `floor(now() × rate / clock)`, within one frame. Frames not drained
+    /// when sound is switched off ([`Machine::set_outputs`]), or before
+    /// [`Machine::load_state`], are dropped; after `load_state` the index
+    /// follows the loaded `now()`. A front
+    /// end may rely on this to keep sound and picture together.
     fn drain_audio(&mut self, out: &mut Vec<[i16; 2]>) -> Result<(), Error>;
 
     /// Say which outputs the front end consumes now. A core need not render
@@ -83,7 +110,9 @@ pub trait Machine {
     fn slot_states(&mut self) -> Vec<SlotState>;
 
     /// Add a medium to a slot's catalogue and return its index. It is not
-    /// inserted by this call.
+    /// inserted by this call. Fails with [`crate::ErrorKind::Usage`] when
+    /// the medium's [`crate::WriteTarget::Kept`] names a record outside the
+    /// rules of [`crate::is_kept_record_name`].
     fn add_medium(&mut self, slot: SlotId, medium: NewMedium<'_>) -> Result<usize, Error>;
 
     /// Change what a slot holds, at the next run boundary.
@@ -93,7 +122,9 @@ pub trait Machine {
     /// description does not list, and with `Usage` when the kind is not
     /// possible in the current status. A `Storage` or `Guest` failure of the
     /// reset itself leaves the status as it was (a halted machine stays
-    /// `Halted`, so its session can still be finished).
+    /// `Halted`, so its session can still be finished). A
+    /// `StorageUncertain` failure leaves the status [`Status::Failed`], or
+    /// `Halted` for a machine that was halted, as in [`Machine::run`].
     fn reset(&mut self, kind: ResetKind) -> Result<(), Error>;
 
     /// A token naming everything a saved state depends on: the core's
@@ -110,9 +141,11 @@ pub trait Machine {
     fn load_state(&mut self, state: &mut dyn Read) -> Result<(), Error>;
 
     /// End the session cleanly: make everything written durable and close
-    /// it as complete. Not valid once the status is `Failed`. Dropping a
-    /// machine without `finish` is the equivalent of a power cut: what was
-    /// already durable stays, and nothing is marked complete.
+    /// it as complete. Not valid once the status is `Failed`. A failed
+    /// `finish` leaves the status [`Status::Failed`]; what was durable before
+    /// it stays durable. Dropping a machine without `finish` is the
+    /// equivalent of a power cut: what was already durable stays, and
+    /// nothing is marked complete.
     fn finish(&mut self) -> Result<Finished, Error>;
 
     /// Move the core's messages since the last call to the end of `out`. A
@@ -130,6 +163,11 @@ pub struct MachineDescription {
     pub step_unit: &'static str,
     pub displays: Vec<DisplayDescription>,
     pub audio: Option<AudioDescription>,
+    /// The input ports, constant for the machine's life. Which device sits
+    /// in a controller port (a pad, a light gun, nothing) is part of the
+    /// machine's config, and these ports show the result. The ports of
+    /// kind [`crate::InputKind::Pad`] are the players, first to last, in
+    /// ascending [`crate::PortId`].
     pub inputs: Vec<InputPortDescription>,
     pub slots: Vec<SlotDescription>,
     /// What this machine can do, within its platform's `Features`.
@@ -289,7 +327,9 @@ pub enum Status {
     Halted,
     /// The guest switched the machine off.
     Off,
-    /// A `Guest` or `Storage` error ended the run; only messages, the last
-    /// frame and dropping the machine remain.
+    /// A `Guest`, `Storage`, `StorageUncertain` or `Content` error ended
+    /// the run, or `finish` failed; only messages, the last frame and
+    /// dropping the machine remain. The front end retries by creating the
+    /// machine again.
     Failed,
 }

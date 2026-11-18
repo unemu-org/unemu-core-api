@@ -128,9 +128,17 @@ jobs:
           rustup toolchain install stable --profile minimal --target wasm32-unknown-unknown
           rustup default stable
           rustc --version
+      # The contract names no host interface of std (files, paths, the
+      # environment, processes, the network, threads, the host clock).
+      - name: No host interface, self-test
+        run: bash scripts/no-host.sh --self-test
+      - name: No host interface
+        run: bash scripts/no-host.sh
       # The contract builds where there is no operating system.
       - name: Build for wasm32-unknown-unknown
         run: cargo build --locked -p unemu-core-api --target wasm32-unknown-unknown
+      - name: Build for wasm32-unknown-unknown (all features)
+        run: cargo build --locked -p unemu-core-api --target wasm32-unknown-unknown --all-features
 
   oldest-toolchain:
     name: Oldest toolchain

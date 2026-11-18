@@ -4,7 +4,7 @@ A core and a front end name the crate the same way: by the git URL and the
 exact commit of a release tag.
 
 ```toml
-unemu-core-api = { version = "0.1", git = "https://github.com/unemu-org/unemu-core-api", rev = "<the 40 hex digits of the tag's commit>" }
+unemu-core-api = { version = "0.2", git = "https://github.com/unemu-org/unemu-core-api", rev = "<the 40 hex digits of the tag's commit>" }
 ```
 
 - An exact revision, never a branch and never a tag name: a tag can be
@@ -17,6 +17,10 @@ unemu-core-api = { version = "0.1", git = "https://github.com/unemu-org/unemu-co
   [patch."https://github.com/unemu-org/unemu-core-api"]
   unemu-core-api = { path = "<your checkout>" }
   ```
+
+- A core's or a front end's tests may enable the feature `test-support`
+  (a storage and content in memory) in `[dev-dependencies]`, on the same
+  URL and revision. A library never enables it for its users.
 
 ## One copy in every build
 

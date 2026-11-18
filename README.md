@@ -13,13 +13,17 @@ load state, finish. Pause is the absence of a call.
 
 The contract has no platform words (no port, interrupt line, scan code,
 disk geometry or cartridge mapper), no host clock, no randomness, no
-threads and no presentation policy. Time is the core's own, in virtual
-ticks at an exact rate. The crate forbids unsafe code and builds where
-there is no operating system.
+threads, no files and no presentation policy. Time is the core's own, in
+virtual ticks at an exact rate. Content and storage are objects the front
+end hands in: verified content read at any offset (`ContentReader`) and
+records that outlive a run (`Storage`, `Record`). A file a person opens
+reaches a core through `Core::identify`, which writes the config
+`Core::create` reads. The crate forbids unsafe code and builds where there
+is no operating system.
 
-Cores that implement it today: [unemupc](https://github.com/unemu-org/unemupc),
-an IBM PC/AT-class machine. The front end that drives it lives in unemupc's
-repository for now.
+Cores that implement it: [unemupc](https://github.com/unemu-org/unemupc),
+an IBM PC/AT-class machine, implements contract 0.1 and moves to 0.2 next.
+The front end that drives it lives in unemupc's repository for now.
 
 The normative text is the crate's documentation comments and
 [`CHANGELOG.md`](CHANGELOG.md). Comments that cite `core-contract.md §N`
@@ -32,8 +36,8 @@ core and a front end must do.
 Pin the commit of a release tag, as an exact revision:
 
 ```toml
-# The contract between front ends and cores, at the commit of release v0.1.0.
-unemu-core-api = { version = "0.1", git = "https://github.com/unemu-org/unemu-core-api", rev = "<the 40 hex digits of the tag's commit>" }
+# The contract between front ends and cores, at the commit of release v0.2.0.
+unemu-core-api = { version = "0.2", git = "https://github.com/unemu-org/unemu-core-api", rev = "<the 40 hex digits of the tag's commit>" }
 ```
 
 Never a branch, never a tag name, never a `path` dependency and never a
@@ -48,6 +52,15 @@ unemu-core-api = { path = "<your checkout>" }
 The patch applies to the whole dependency graph, so a pinned core that
 names the same URL builds against the local checkout too.
 
+The feature `test-support` adds `unemu_core_api::test_support`: a scripted
+storage in memory that models durability and planted failures, and content
+in memory. Enable it for a core's or a front end's tests only:
+
+```toml
+[dev-dependencies]
+unemu-core-api = { version = "0.2", git = "https://github.com/unemu-org/unemu-core-api", rev = "<the same revision>", features = ["test-support"] }
+```
+
 - [`docs/versioning.md`](docs/versioning.md): what a version number means
   and when a release breaks.
 - [`docs/embedding.md`](docs/embedding.md): how a core and a front end
@@ -58,7 +71,10 @@ names the same URL builds against the local checkout too.
 
 ```sh
 cargo test
-cargo doc --no-deps
+cargo test --all-features
+cargo doc --no-deps --all-features
+bash scripts/no-dependency.sh
+bash scripts/no-host.sh
 ```
 
 The minimum Rust version is the `rust-version` in `Cargo.toml`.

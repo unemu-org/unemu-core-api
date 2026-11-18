@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! The contract between front ends and emulator cores; see
-//! `backlog/docs/design/core-contract.md` §3.
+//! `backlog/docs/design/core-contract.md` §3, §12.5 and §13.2.
 //!
 //! A front end holds every compiled-in [`Core`] and asks it for machines. A
 //! machine is driven by five kinds of call on [`Machine`]: run to a limit,
@@ -14,6 +14,12 @@
 //! has). A front end enables a control from a description and never by trying
 //! a call; a call the description promised that answers
 //! [`ErrorKind::Unsupported`] is a core bug.
+//!
+//! A core touches nothing of the host. What it reads comes as [`Content`]
+//! from a [`ContentSource`], by digest; what must outlive a run goes to
+//! [`Record`]s of the [`Storage`] the front end hands to [`Core::create`]. A
+//! file a person opens reaches a core through [`Core::identify`], which
+//! writes the config [`Core::create`] reads.
 //!
 //! Rules of the crate (§3.1):
 //!
@@ -31,9 +37,15 @@
 //!   unit (§3.11).
 //! - No presentation policy: pacing, speed, pause, frame rate, window size,
 //!   fonts, key bindings and audio devices belong to the front end.
+//! - No host: the contract names no file, directory or path; content and
+//!   storage are objects the front end hands in (§12.5).
+//!
+//! The feature `test-support` adds the module `test_support`: a scripted
+//! storage and content in memory for the tests of cores and front ends.
 
 #![forbid(unsafe_code)]
 
+mod content;
 mod control;
 mod core;
 mod error;
@@ -41,23 +53,46 @@ mod input;
 mod machine;
 mod media;
 mod output;
+mod storage;
 mod version;
 
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
+
+pub use crate::content::{ContentKind, ContentRef, Identified, OfferedContent, Validated};
 pub use crate::control::{Finished, ResetKind};
 pub use crate::core::{
-    ConfigDocument, Content, ContentSource, Core, CoreDescription, CreateRequest, Features, Notice,
-    OptionDescription, PlatformDescription,
+    ConfigDocument, ConfigDocumentBuf, Content, ContentSource, Core, CoreDescription,
+    CreateRequest, Features, Notice, OptionDescription, PlatformDescription,
 };
 pub use crate::error::{Diagnostic, Error, ErrorKind, Message, MessageLevel};
 pub use crate::input::{
-    InputEvent, InputKind, InputPortDescription, Key, KeyState, PadControl, PortId,
+    pointer_pixel, InputEvent, InputKind, InputPortDescription, Key, KeyState, PadControl, PortId,
 };
 pub use crate::machine::{Machine, MachineDescription, Rate, RunLimit, Status, Stop, Ticks};
 pub use crate::media::{
     MediaAction, MediumInfo, NewMedium, SlotDescription, SlotId, SlotKind, SlotState, WriteKind,
     WriteTarget,
 };
-pub use crate::output::{AudioDescription, DisplayDescription, DisplayId, Frame, Outputs};
+pub use crate::output::{
+    AudioDescription, DisplayDescription, DisplayId, Frame, FrameArea, Outputs,
+};
+pub use crate::storage::{
+    is_kept_record_name, is_record_name, ContentReader, Record, Replacement, Storage,
+    KEPT_RECORD_PREFIX,
+};
+
+// What `identify` and `validate` answer, and the errors and messages a core
+// reports, may be handed to another thread: a front end asks cores from a
+// worker. A field that is not `Send` fails the build here.
+const _: () = {
+    const fn assert_send<T: Send>() {}
+    assert_send::<Identified>();
+    assert_send::<Validated>();
+    assert_send::<ConfigDocumentBuf>();
+    assert_send::<Error>();
+    assert_send::<Message>();
+};
 pub use crate::version::{ContractVersion, CONTRACT};
 
 #[cfg(test)]

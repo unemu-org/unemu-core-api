@@ -12,11 +12,10 @@
 //!
 //! Layered disk images stay possible: a base is read-only [`crate::Content`]
 //! named by its digest and hashed in full by the source, written sectors go
-//! to a [`WriteTarget`] below the session directory and never into the base,
-//! and nothing here rewrites a base in place.
+//! to a [`WriteTarget`], a record of the machine's [`crate::Storage`], and
+//! never into the base, and nothing here rewrites a base in place.
 
 use crate::Content;
-use std::path::Path;
 
 /// One slot of a machine.
 #[non_exhaustive]
@@ -148,7 +147,8 @@ pub enum WriteKind {
     ReadOnly,
     /// Guest writes are kept in memory and lost with the session.
     Discarded,
-    /// Guest writes are kept in the session, separate from the base.
+    /// Guest writes are kept in the machine's storage, separate from the
+    /// base.
     Kept,
 }
 
@@ -191,10 +191,18 @@ impl<'a> NewMedium<'a> {
 pub enum WriteTarget<'a> {
     ReadOnly,
     Discarded,
-    /// Keep written sectors in this file below the session directory. The
-    /// core owns its format; the base is never changed.
+    /// Keep written sectors in this record of the machine's storage, named
+    /// by the front end under the rules of [`crate::is_kept_record_name`]:
+    /// a record name that starts with [`crate::KEPT_RECORD_PREFIX`]. The
+    /// core owns the record's format; the base is never changed. Replaces
+    /// the file path of contract 0.1.
+    ///
+    /// [`crate::Machine::add_medium`] fails with
+    /// [`crate::ErrorKind::Usage`] for a name that breaks those rules. The
+    /// core opens the record at the latest when the medium is inserted; a
+    /// failure to open it fails the next run ([`crate::Machine::run`]).
     Kept {
-        file: &'a Path,
+        record: &'a str,
     },
 }
 

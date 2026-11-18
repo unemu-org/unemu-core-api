@@ -1,11 +1,16 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Input (core-contract.md §3.7).
+//! Input (core-contract.md §3.7 and §13.2).
 //!
 //! The front end maps its toolkit's key codes to [`Key`] and decides what is
 //! a host shortcut and what goes to the guest. Pointer capture, its release
 //! chord and the swallowed first click stay in the front end. Everything
 //! after [`crate::Machine::input`] is the core's: encoding, repeat, device
 //! back-pressure, coalescing and overflow.
+//!
+//! Which host key or button is which control is the front end's: no core
+//! carries a key map, a dead zone or a turbo setting.
+
+use crate::DisplayId;
 
 /// One input event for the guest.
 #[non_exhaustive]
@@ -32,8 +37,36 @@ pub enum InputEvent {
         pressed: bool,
     },
     /// The front end lost focus: every held key, button and control of
-    /// every port is released.
+    /// every port is released. An absolute pointer keeps its position; a
+    /// front end that loses focus also sends [`InputEvent::PointerPosition`]
+    /// with `None`.
     ReleaseAll,
+    /// Where an absolute pointing device points now.
+    ///
+    /// `position` is a place on the whole picture of the port's display
+    /// (never only its `visible` part): `x` from the left edge and `y`
+    /// from the top edge, each a fraction of 65 536, so that pixel column
+    /// `x * width / 65 536` and pixel row `y * height / 65 536` are meant
+    /// whatever size the picture has when the event takes effect
+    /// ([`pointer_pixel`]). `None` while the device points off the picture.
+    /// The position holds until the next event for the port. The port's
+    /// buttons are [`InputEvent::PointerButton`] events. What the device
+    /// senses there (the beam's time, the brightness under the gun) is the
+    /// core's business.
+    PointerPosition {
+        port: PortId,
+        position: Option<(u16, u16)>,
+    },
+}
+
+/// The pixel an absolute pointer's `position` means on a picture of
+/// `width` × `height` pixels: column `x * width / 65 536` and row
+/// `y * height / 65 536`, rounded down ([`InputEvent::PointerPosition`]).
+pub const fn pointer_pixel(position: (u16, u16), width: u32, height: u32) -> (u32, u32) {
+    (
+        ((position.0 as u64 * width as u64) >> 16) as u32,
+        ((position.1 as u64 * height as u64) >> 16) as u32,
+    )
 }
 
 /// A key by its position: the usage id of the USB HID keyboard page (USB
@@ -263,8 +296,18 @@ pub enum InputKind {
     RelativePointer {
         buttons: u8,
     },
+    /// A game pad with these controls. The ports of this kind are the
+    /// players, first to last, in ascending [`PortId`].
     Pad {
         controls: Vec<PadControl>,
+    },
+    /// A device that points at a place on one display: a light gun, a
+    /// light pen, a touch screen. The front end sends where the host
+    /// pointer is over that display's picture
+    /// ([`InputEvent::PointerPosition`]) and does not capture it.
+    AbsolutePointer {
+        display: DisplayId,
+        buttons: u8,
     },
 }
 

@@ -4,7 +4,8 @@
 //!
 //! A core keeps its own typed errors inside and maps them at its adapter;
 //! the message is the typed error's text. Host failures stay out of the
-//! guest: they surface as [`ErrorKind::Storage`] at a run boundary.
+//! guest: they surface as [`ErrorKind::Storage`] or
+//! [`ErrorKind::StorageUncertain`] at a run boundary.
 
 use std::fmt;
 
@@ -56,13 +57,20 @@ pub enum ErrorKind {
     Unsupported,
     /// The emulated machine cannot continue.
     Guest,
-    /// A host write or read below the session directory failed. The guest
-    /// never sees it.
+    /// A host read or write of the machine's storage or of its content
+    /// failed. The guest never sees it.
     Storage,
     /// A saved state does not fit this machine.
     State,
-    /// The call is not valid in the machine's current status.
+    /// The call is not valid in the machine's current status, or not valid
+    /// for the object it was made on.
     Usage,
+    /// A host write failed in a way that leaves it unknown whether it took
+    /// effect. The object it was made on must be opened again before it is
+    /// written ([`crate::Record`], [`crate::Replacement::commit`]). At a run
+    /// boundary it fails the machine as `Storage` does
+    /// ([`crate::Machine::run`]).
+    StorageUncertain,
 }
 
 /// Where in a config document a problem is.

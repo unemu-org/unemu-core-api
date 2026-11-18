@@ -1,7 +1,7 @@
 # Versioning
 
-The package version is the contract's: release `0.1.0` is
-`CONTRACT` 0.1, and `MAJOR.MINOR` of every release equals the
+The package version is the contract's: release `0.2.0` is
+`CONTRACT` 0.2, and `MAJOR.MINOR` of every release equals the
 `ContractVersion` it defines.
 
 ## Before 1.0
@@ -15,7 +15,8 @@ front end may call or read: a method, a field, a variant, or a rule in a
 documentation comment that a core must hold.
 
 A **patch** release changes none of that: documentation, tests, a
-test-only helper, a named constant for a value that already existed.
+helper behind the `test-support` feature, a named constant for a value
+that already existed.
 
 ## From 1.0
 

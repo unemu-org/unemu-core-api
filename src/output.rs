@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Picture and sound out (core-contract.md §3.6).
+//! Picture and sound out (core-contract.md §3.6 and §13.2).
 //!
 //! The picture is pixels; a text mode, its cells and its fonts are the
 //! core's business, and the core rasterises. Output is pulled: the front end
@@ -22,9 +22,21 @@ pub struct Frame<'a> {
     /// Changes whenever the pixels changed, so an unchanged picture is not
     /// uploaded again.
     pub serial: u64,
+    /// The part of the picture that a display of the machine's time
+    /// showed for certain; the rest is overscan, which may hold garbage.
+    /// The whole picture when the core has nothing to say, which is what
+    /// [`Frame::new`] sets. A front end may show only this part. `aspect`
+    /// is always the shape of the whole picture, and the pixels keep
+    /// their shape when a front end crops.
+    ///
+    /// Cropping is the front end's choice, not a setting of the machine:
+    /// the core always hands over the whole picture, so a saved state, a
+    /// replay and a screenshot do not depend on it.
+    pub visible: FrameArea,
 }
 
 impl<'a> Frame<'a> {
+    /// A picture whose whole area is visible.
     pub fn new(
         width: u32,
         height: u32,
@@ -38,7 +50,66 @@ impl<'a> Frame<'a> {
             pixels,
             aspect,
             serial,
+            visible: FrameArea {
+                x: 0,
+                y: 0,
+                width,
+                height,
+            },
         }
+    }
+
+    /// Mark the part of the picture a display showed for certain.
+    ///
+    /// The area is cut to the picture; an area that shares no pixel with
+    /// the picture leaves the whole picture visible, as a core with nothing
+    /// to say would. The field stays public, so a front end that reads a
+    /// frame checks it with [`FrameArea::is_within`] before it crops.
+    pub fn with_visible(mut self, visible: FrameArea) -> Self {
+        let left = visible.x.min(self.width);
+        let top = visible.y.min(self.height);
+        let right = visible.x.saturating_add(visible.width).min(self.width);
+        let bottom = visible.y.saturating_add(visible.height).min(self.height);
+        self.visible = if left < right && top < bottom {
+            FrameArea {
+                x: left,
+                y: top,
+                width: right - left,
+                height: bottom - top,
+            }
+        } else {
+            FrameArea {
+                x: 0,
+                y: 0,
+                width: self.width,
+                height: self.height,
+            }
+        };
+        self
+    }
+}
+
+/// A rectangle of a picture, in its pixels: `x` columns from the left edge,
+/// `y` rows from the top edge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameArea {
+    /// The first column, counted from the left edge.
+    pub x: u32,
+    /// The first row, counted from the top edge.
+    pub y: u32,
+    /// The number of columns.
+    pub width: u32,
+    /// The number of rows.
+    pub height: u32,
+}
+
+impl FrameArea {
+    /// Whether the area lies within a picture of `width` × `height` pixels.
+    /// A front end checks a [`Frame::visible`] it did not build before it
+    /// crops by it.
+    pub const fn is_within(self, width: u32, height: u32) -> bool {
+        (self.x as u64) + (self.width as u64) <= width as u64
+            && (self.y as u64) + (self.height as u64) <= height as u64
     }
 }
 
@@ -64,13 +135,49 @@ impl DisplayDescription {
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AudioDescription {
-    /// Stereo frames per second, exact.
+    /// Stereo frames per second, exact, from 8 000 to 192 000: the rate
+    /// natural to the machine. A core never resamples to suit a host
+    /// device; the front end converts to whatever it plays.
+    ///
+    /// A machine whose sound generator runs faster than 192 000 Hz (a
+    /// chip clocked at the processor's rate) filters and divides by a
+    /// whole number inside the core, because only the core knows its
+    /// signal, and states the divided rate. It is still an exact
+    /// fraction: 19 687 500/11 Hz divided by 40 is 984 375/22 Hz.
+    ///
+    /// A machine with one sound channel puts it in both samples of a
+    /// frame.
+    ///
+    /// Frame `i` is the sound at virtual time `i × clock / rate` ticks from
+    /// creation, where `clock` is the machine's clock. At every return of
+    /// [`crate::Machine::run`], once [`crate::Machine::drain_audio`] has
+    /// been called, the next frame it will hand over has index
+    /// `floor(now() × rate / clock)`, within one frame. Frames not drained
+    /// when sound is switched off ([`crate::Machine::set_outputs`]), or
+    /// before [`crate::Machine::load_state`], are dropped; after
+    /// `load_state` the index follows the loaded `now()`.
     pub rate: Rate,
 }
 
 impl AudioDescription {
+    /// The lowest rate a machine states, in frames per second.
+    pub const MIN_RATE: u64 = 8_000;
+    /// The highest rate a machine states, in frames per second.
+    pub const MAX_RATE: u64 = 192_000;
+
     pub const fn new(rate: Rate) -> Self {
         Self { rate }
+    }
+
+    /// Whether `rate` lies within [`Self::MIN_RATE`] and [`Self::MAX_RATE`],
+    /// compared exactly. A rate with a zero denominator names no rate and
+    /// is not within them.
+    pub const fn rate_in_bounds(&self) -> bool {
+        let numerator = self.rate.numerator as u128;
+        let denominator = self.rate.denominator as u128;
+        denominator != 0
+            && numerator >= Self::MIN_RATE as u128 * denominator
+            && numerator <= Self::MAX_RATE as u128 * denominator
     }
 }
 

@@ -1,9 +1,13 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! The core, its description as data, and creating a machine
-//! (core-contract.md §3.3 and §3.4).
+//! (core-contract.md §3.3, §3.4, §12.5 and §13.2).
 
-use crate::{ContractVersion, Error, Machine, ResetKind};
-use std::path::Path;
+use crate::{
+    ContentKind, ContentReader, ContractVersion, Error, ErrorKind, Identified, Machine,
+    OfferedContent, ResetKind, Storage, Validated,
+};
+use std::fmt;
+use std::rc::Rc;
 
 /// One emulator core: a stateless factory for machines of the platforms it
 /// provides.
@@ -18,11 +22,54 @@ pub trait Core: Send + Sync {
     /// Build a machine, stopped at virtual time zero.
     ///
     /// Reads the config document, takes every blob it names from
-    /// `request.content`, and writes only below `request.session`. Fails
-    /// with [`crate::ErrorKind::Config`], `Content` or `Unsupported`; a
-    /// failed create leaves nothing running and nothing half-written that a
-    /// later create could mistake for a session.
+    /// `request.content`, and keeps what must outlive the run only in
+    /// records of `request.storage`. Fails with [`crate::ErrorKind::Config`],
+    /// `Content` or `Unsupported`; a failed create leaves nothing running
+    /// and nothing half-written that a later create could mistake for a
+    /// session.
     fn create(&self, request: &CreateRequest<'_>) -> Result<Box<dyn Machine>, Error>;
+
+    /// Say whether this core runs `content`, and as what.
+    ///
+    /// `Ok(None)`: the bytes are not content this core opens; the front
+    /// end asks the next core. `Ok(Some(..))`: the platform, the kind and
+    /// the config of a machine that runs the content with the platform's
+    /// defaults. Fails with [`ErrorKind::Unsupported`] when the core
+    /// recognises the content and cannot run it, such as a cartridge
+    /// board it does not model; the message names what is missing, and
+    /// the front end shows it instead of "unknown file". Fails with
+    /// `Content` or `Storage` as [`ContentReader::read_at`] did.
+    ///
+    /// The core reads what it needs through `content.bytes`: a header,
+    /// or all of it. It keeps nothing: the call builds no machine and
+    /// changes no state. The same bytes give the same answer in every
+    /// run of one release of the core.
+    ///
+    /// The default answers `Ok(None)`: a core that opens no content
+    /// recognises nothing.
+    fn identify(&self, content: &OfferedContent<'_>) -> Result<Option<Identified>, Error> {
+        let _ = content;
+        Ok(None)
+    }
+
+    /// Check a config document without building a machine, and name the
+    /// content it needs.
+    ///
+    /// Fails with [`ErrorKind::Config`], with diagnostics, as `create`
+    /// would for the same document, and with `Unsupported` for a platform
+    /// or a config type the core does not read. On success `create` asks
+    /// its [`ContentSource`] for exactly the listed content. A front end
+    /// verifies that content before it calls `create`; a store-side
+    /// validator can be written over this call alone.
+    ///
+    /// The default answers `Unsupported`.
+    fn validate(&self, platform: &str, config: ConfigDocument<'_>) -> Result<Validated, Error> {
+        let _ = (platform, config);
+        Err(Error::new(
+            ErrorKind::Unsupported,
+            "this core does not validate configs",
+        ))
+    }
 }
 
 /// A core, as data. A front end lists cores and enables controls from this
@@ -93,11 +140,18 @@ pub struct PlatformDescription {
     pub features: Features,
     /// Run-only options [`Core::create`] accepts, outside machine identity.
     pub options: &'static [OptionDescription],
+    /// The kinds of content a person can open to start a machine of this
+    /// platform. Empty for a platform whose machines start only from a
+    /// config, such as a computer that is assembled from parts.
+    ///
+    /// A platform that opens content lists at least one config type,
+    /// because [`Core::identify`] answers in one.
+    pub content: &'static [ContentKind],
 }
 
 impl PlatformDescription {
     /// A platform that reads no config type, can do nothing beyond running,
-    /// and takes no options.
+    /// takes no options and opens no content.
     pub const fn new(id: &'static str, name: &'static str) -> Self {
         Self {
             id,
@@ -105,6 +159,7 @@ impl PlatformDescription {
             config_types: &[],
             features: Features::NONE,
             options: &[],
+            content: &[],
         }
     }
 
@@ -120,6 +175,12 @@ impl PlatformDescription {
 
     pub const fn with_options(mut self, options: &'static [OptionDescription]) -> Self {
         self.options = options;
+        self
+    }
+
+    /// The kinds of content a person can open to start a machine.
+    pub const fn with_content(mut self, content: &'static [ContentKind]) -> Self {
+        self.content = content;
         self
     }
 }
@@ -215,11 +276,12 @@ pub struct CreateRequest<'a> {
     pub config: ConfigDocument<'a>,
     /// Verified content by digest: firmware, disk bases, media.
     pub content: &'a dyn ContentSource,
-    /// A directory the front end owns for this machine. The core keeps
-    /// there what must outlive the run: written sectors, non-volatile
-    /// memory, saved battery memory. The core never writes outside it and
-    /// never changes a file it took from `content`.
-    pub session: &'a Path,
+    /// Where the machine keeps what must outlive the run: written sectors,
+    /// non-volatile memory, battery-backed memory. The machine holds it for
+    /// its whole life and opens a record when it needs one, such as when a
+    /// medium is inserted. The core never writes content it took from
+    /// `content`.
+    pub storage: Rc<dyn Storage>,
     /// Run-only options, by the keys the platform describes. An unknown key
     /// is refused.
     pub options: &'a [(&'a str, &'a str)],
@@ -231,13 +293,13 @@ impl<'a> CreateRequest<'a> {
         platform: &'a str,
         config: ConfigDocument<'a>,
         content: &'a dyn ContentSource,
-        session: &'a Path,
+        storage: Rc<dyn Storage>,
     ) -> Self {
         Self {
             platform,
             config,
             content,
-            session,
+            storage,
             options: &[],
         }
     }
@@ -262,6 +324,29 @@ impl<'a> ConfigDocument<'a> {
     }
 }
 
+/// A config document a core wrote, such as the answer of
+/// [`Core::identify`].
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigDocumentBuf {
+    /// One of the platform's `config_types`.
+    pub media_type: &'static str,
+    pub bytes: Vec<u8>,
+}
+
+impl ConfigDocumentBuf {
+    /// A document of `media_type` holding `bytes`.
+    pub fn new(media_type: &'static str, bytes: Vec<u8>) -> Self {
+        Self { media_type, bytes }
+    }
+
+    /// The document, borrowed, as [`Core::validate`] and [`Core::create`]
+    /// take it.
+    pub fn as_document(&self) -> ConfigDocument<'_> {
+        ConfigDocument::new(self.media_type, &self.bytes)
+    }
+}
+
 /// Content addressed by SHA-256.
 ///
 /// The source has hashed the whole content, never a prefix and never a
@@ -276,11 +361,23 @@ pub trait ContentSource {
 
 /// Verified read-only content.
 #[non_exhaustive]
-#[derive(Debug)]
 pub enum Content {
     /// Small content, in memory.
     Bytes(Vec<u8>),
-    /// Large content, opened for random access. The core reads it and never
-    /// writes it.
-    File(std::fs::File),
+    /// Large content, read at any offset. The core reads it and never
+    /// writes it. Replaces `File` of contract 0.1.
+    Reader(Box<dyn ContentReader>),
+}
+
+impl fmt::Debug for Content {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Bytes(bytes) => formatter.debug_tuple("Bytes").field(bytes).finish(),
+            // A reader is not `Debug`; its size is what identifies it here.
+            Self::Reader(reader) => formatter
+                .debug_struct("Reader")
+                .field("size", &reader.size())
+                .finish(),
+        }
+    }
 }

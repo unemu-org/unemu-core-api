@@ -9,7 +9,7 @@ use crate::{FileContent, FileStorage};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -92,7 +92,10 @@ fn the_storage_creates_its_directory() {
     let nested = dir.path().join("saves").join("core").join("ab");
     let storage = FileStorage::open(&nested).expect("storage");
     assert!(nested.is_dir());
-    assert_eq!(storage.dir(), nested.as_path());
+    let canonical = fs::canonicalize(&nested).expect("canonical");
+    assert_eq!(storage.dir(), canonical.as_path());
+    let again = FileStorage::open(nested.join("..").join("ab")).expect("storage");
+    assert_eq!(again.dir(), canonical.as_path(), "the same directory");
 }
 
 #[test]
@@ -213,9 +216,9 @@ fn lock_holder_child() {
     let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut rest);
 }
 
-#[test]
-fn a_record_held_by_another_process_does_not_open() {
-    let dir = TempDir::new();
+/// Start a child process that holds the record `shared` of `dir`, and wait
+/// until it does. Answers the child and the rest of its output.
+fn spawn_lock_holder(dir: &TempDir) -> (Child, Box<dyn Iterator<Item = String>>) {
     let mut child = Command::new(std::env::current_exe().expect("the test binary"))
         .args([
             "tests::lock_holder_child",
@@ -234,7 +237,13 @@ fn a_record_held_by_another_process_does_not_open() {
     let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
     let holding = lines.by_ref().any(|line| line.contains("holding"));
     assert!(holding, "the child did not take the record");
+    (child, Box::new(lines))
+}
 
+#[test]
+fn a_record_held_by_another_process_does_not_open() {
+    let dir = TempDir::new();
+    let (mut child, lines) = spawn_lock_holder(&dir);
     let storage = FileStorage::open(dir.path()).expect("storage");
     assert_eq!(kind(storage.open("shared")), ErrorKind::Usage);
     storage.open("other").expect("another record opens");
@@ -245,6 +254,29 @@ fn a_record_held_by_another_process_does_not_open() {
     lines.for_each(drop);
     assert!(child.wait().expect("the child ends").success());
     storage.open("shared").expect("open after the child ended");
+}
+
+#[test]
+fn a_record_held_by_a_killed_process_opens_again() {
+    let dir = TempDir::new();
+    let (mut child, lines) = spawn_lock_holder(&dir);
+    let storage = FileStorage::open(dir.path()).expect("storage");
+    assert_eq!(kind(storage.open("shared")), ErrorKind::Usage);
+    child.kill().expect("kill the child");
+    child.wait().expect("the child ends");
+    lines.for_each(drop);
+    // Windows may give a dead process's lock back a moment late.
+    let mut attempts = 0;
+    loop {
+        match storage.open("shared") {
+            Ok(_) => break,
+            Err(error) if error.kind == ErrorKind::Usage && attempts < 100 => {
+                attempts += 1;
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => panic!("the dead child's lock stays: {error}"),
+        }
+    }
 }
 
 // --- replacement -----------------------------------------------------------
@@ -442,6 +474,20 @@ fn a_failed_cut_that_kept_the_length_leaves_the_record_as_it_was() {
 }
 
 #[test]
+fn a_failed_cut_that_changed_the_length_is_uncertain() {
+    let dir = TempDir::new();
+    let (storage, mut record) = record_with_old(&dir);
+    storage.fail_next("r", Step::SetLenAfter);
+    assert_eq!(kind(record.truncate(1)), ErrorKind::StorageUncertain);
+    assert_eq!(read_all(&mut *record), b"o", "reads follow the file");
+    assert_writes_need_reopening(&mut *record);
+    drop(record);
+    let mut record = storage.open("r").expect("open again");
+    assert_eq!(read_all(&mut *record), b"o");
+    record.append(b"!").expect("writable after reopening");
+}
+
+#[test]
 fn a_failed_sync_is_uncertain() {
     let dir = TempDir::new();
     let (storage, mut record) = record_with_old(&dir);
@@ -462,13 +508,21 @@ fn a_new_record_s_first_sync_also_makes_its_name_durable() {
     assert_eq!(kind(record.sync()), ErrorKind::StorageUncertain);
     assert_writes_need_reopening(&mut *record);
     drop(record);
-    // The name is synchronised once: a sync after it touches the file only.
+    // The next opening cannot tell whether the name was made durable, so
+    // its first sync makes it durable again; later syncs touch the file
+    // only.
     let mut record = storage.open("r").expect("open again");
     record.append(b"!").expect("append");
     storage.fail_next("r", Step::SyncDirectory);
+    assert_eq!(kind(record.sync()), ErrorKind::StorageUncertain);
+    drop(record);
+    let mut record = storage.open("r").expect("open a third time");
+    record.sync().expect("sync");
+    record.append(b"?").expect("append");
+    storage.fail_next("r", Step::SyncDirectory);
     record
         .sync()
-        .expect("an existing record's sync leaves the directory");
+        .expect("a second sync of one opening leaves the directory");
 }
 
 #[test]
@@ -558,6 +612,28 @@ fn content_reads_within_its_bounds() {
     assert_eq!(kind(reader.read_at(7, &mut buf)), ErrorKind::Usage);
     assert_eq!(kind(reader.read_at(u64::MAX, &mut buf)), ErrorKind::Usage);
     assert_eq!(kind(reader.read_at(11, &mut [])), ErrorKind::Usage);
+}
+
+#[test]
+fn content_reads_from_two_threads_do_not_mix() {
+    let dir = TempDir::new();
+    let path = dir.path().join("base.img");
+    let bytes: Vec<u8> = (0..1 << 16).map(|index: u32| (index % 251) as u8).collect();
+    fs::write(&path, &bytes).expect("file");
+    let content = FileContent::open(&path, bytes.len() as u64).expect("content");
+    std::thread::scope(|scope| {
+        for start in [0usize, 1 << 15] {
+            let (content, bytes) = (&content, &bytes);
+            scope.spawn(move || {
+                let mut buf = [0; 509];
+                for round in 0..4000 {
+                    let offset = start + (round * 7) % ((1 << 15) - buf.len());
+                    content.read_at(offset as u64, &mut buf).expect("read");
+                    assert_eq!(&buf[..], &bytes[offset..offset + buf.len()], "{offset}");
+                }
+            });
+        }
+    });
 }
 
 #[test]

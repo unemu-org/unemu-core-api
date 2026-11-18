@@ -122,15 +122,18 @@ the contract names no file system or path type.
   `nul_.bin`). A record is held through an exclusive lock on its own lock
   file, across storages and programs, and a held record fails to open
   with `Usage`. `sync` is `sync_all` (`F_FULLFSYNC` on Apple's systems)
-  and syncs the directory after a record's creation on Unix; a commit
-  writes a temporary sibling, syncs it, renames it over the record and
-  makes the rename durable (a directory sync on Unix; on Windows, which
-  has no directory sync in the standard library, a second sync of the
-  renamed file). The failure rules of `Record` are held; temporary files
+  and, on the first sync of each opening, also syncs the directory on
+  Unix; a commit writes a temporary sibling, syncs it, renames it over the
+  record and makes the rename durable (a directory sync on Unix; on
+  Windows, which has no directory sync in the standard library, a second
+  sync of the renamed file). The failure rules of `Record` are held; temporary files
   a crash left are removed when the record is opened. `FileContent` is a
   `ContentReader` over a file of verified length that fails a read with
-  `Content` when the file's length or modification time changed. Its
-  tests run on Linux, macOS and Windows; `no-dependency.sh` and
+  `Content` when the file's length or modification time changed; its
+  reads are positional, so threads may share one. `FileStorage` keeps the
+  directory's canonical path. The locks are the local file system's
+  (`flock`, `LockFileEx`), not a network file system's emulation. The
+  crate's tests run on Linux, macOS and Windows; `no-dependency.sh` and
   `no-host.sh` keep checking the contract's package only.
 - `docs/conformance.md` is the checklist of contract 0.2.
 

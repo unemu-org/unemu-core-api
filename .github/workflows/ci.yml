@@ -31,10 +31,15 @@ env:
   RUSTDOCFLAGS: ""
 
 jobs:
+  # Clippy on each system, because files/ has code for Unix and for Windows.
   lint:
-    name: Format and lint
-    runs-on: ubuntu-24.04
+    name: Format and lint (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2025]
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -51,6 +56,7 @@ jobs:
           path: target
           key: target-v1-lint-${{ runner.os }}-${{ hashFiles('Cargo.toml', 'files/Cargo.toml', 'Cargo.lock') }}
       - name: Format
+        if: matrix.os == 'ubuntu-24.04'
         run: cargo fmt --check
       - name: Clippy
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings

@@ -5,7 +5,7 @@
 use crate::names::file_name;
 use std::cell::RefCell;
 use std::fs::{self, File, OpenOptions, TryLockError};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use unemu_core_api::{Error, ErrorKind, Record, Replacement, Storage};
@@ -31,13 +31,21 @@ use unemu_core_api::{Error, ErrorKind, Record, Replacement, Storage};
 /// system without file locks fails the open with [`ErrorKind::Storage`]; it
 /// never opens without the lock.
 ///
+/// The locks are those of the host's own file system (`flock` on Unix,
+/// `LockFileEx` on Windows), meant for a directory on a local disk. On a
+/// network file system they are only as good as its emulation: an NFS
+/// client emulates `flock` with locks that are per process, so two
+/// storages in one program may then both open a record. A program that
+/// dies gives its locks back; Windows may do so a moment late, so a program
+/// started again at once can meet a transient [`ErrorKind::Usage`].
+///
 /// # Durability
 ///
 /// [`Record::sync`] calls [`File::sync_all`], which on Apple's systems is
 /// `F_FULLFSYNC`, so the bytes reach the medium and not only the drive's
-/// cache. When the sync follows the file's creation, the directory is
-/// synchronised as well on Unix, so the record's name survives a power cut
-/// with its bytes.
+/// cache. The first sync of each opening also synchronises the directory
+/// on Unix, so the record's name survives a power cut with its bytes, even
+/// when an earlier opening created the file and crashed before its sync.
 ///
 /// [`Replacement::commit`] synchronises the new contents in a temporary
 /// sibling `FILE_N.tmp`, renames it over the record's file (one atomic step
@@ -80,21 +88,25 @@ pub struct FileStorage {
 
 impl FileStorage {
     /// The storage in the directory `dir`, created when it does not exist
-    /// (with its missing parents, each made durable in its own parent on
-    /// Unix).
+    /// (with its missing parents). On Unix each directory it created, and
+    /// `dir` itself when it already existed, is made durable in its parent.
+    /// The storage keeps the directory's canonical path, so a later change
+    /// of the working directory or of a link on the way does not move it.
     ///
     /// Fails with [`ErrorKind::Storage`] when the directory cannot be
-    /// created.
+    /// created or found.
     pub fn open(dir: impl AsRef<Path>) -> Result<Self, Error> {
         let dir = dir.as_ref();
         create_dir_durably(dir).map_err(|error| host("cannot create the directory", &error))?;
+        let dir =
+            fs::canonicalize(dir).map_err(|error| host("cannot find the directory", &error))?;
         Ok(Self {
-            dir: dir.to_path_buf(),
+            dir,
             faults: Faults::default(),
         })
     }
 
-    /// The directory of the records.
+    /// The directory of the records, as a canonical path.
     pub fn dir(&self) -> &Path {
         &self.dir
     }
@@ -134,7 +146,9 @@ impl Storage for FileStorage {
                 exists: data.is_some(),
                 data,
                 len,
-                directory_unsynced: false,
+                // An earlier opening may have created the file and crashed
+                // before it made the name durable.
+                directory_unsynced: true,
                 poisoned: false,
                 released: false,
                 replacement: None,
@@ -156,6 +170,9 @@ pub(crate) enum Step {
     Restore,
     /// The cut of a record's `truncate`.
     SetLen,
+    /// After the cut of a record's `truncate` took place: the host reports
+    /// a failure anyway.
+    SetLenAfter,
     /// `sync_all` of a record's file.
     SyncFile,
     /// Making a new name durable: the directory sync after a record's
@@ -214,9 +231,31 @@ pub(crate) fn within(offset: u64, len: usize, size: u64) -> bool {
         .is_some_and(|end| end <= size)
 }
 
-fn read_exact_at(mut file: &File, offset: u64, buf: &mut [u8]) -> io::Result<()> {
-    file.seek(SeekFrom::Start(offset))?;
-    file.read_exact(buf)
+/// Fill `buf` from `offset` without the file's shared cursor, so that
+/// several threads may read one file at once.
+#[cfg(unix)]
+pub(crate) fn read_exact_at(file: &File, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+    std::os::unix::fs::FileExt::read_exact_at(file, buf, offset)
+}
+
+/// Fill `buf` from `offset`. Windows has no positional read that leaves
+/// the cursor alone, but a read at an explicit offset does not depend on
+/// it either, so concurrent reads do not mix.
+#[cfg(windows)]
+pub(crate) fn read_exact_at(file: &File, mut offset: u64, mut buf: &mut [u8]) -> io::Result<()> {
+    use std::os::windows::fs::FileExt;
+    while !buf.is_empty() {
+        match file.seek_read(buf, offset) {
+            Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
+            Ok(read) => {
+                buf = &mut std::mem::take(&mut buf)[read..];
+                offset += read as u64;
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 /// Write `bytes` at `offset`; when `fail` is an error, write half of them
@@ -292,6 +331,9 @@ fn parent(path: &Path) -> &Path {
         .unwrap_or(Path::new("."))
 }
 
+/// Create `dir` and its missing parents, and make the name of each
+/// directory it created durable; when `dir` already existed, make its own
+/// name durable, as its creator may have crashed before doing so.
 fn create_dir_durably(dir: &Path) -> io::Result<()> {
     let mut missing = Vec::new();
     let mut cursor = Some(dir);
@@ -303,6 +345,9 @@ fn create_dir_durably(dir: &Path) -> io::Result<()> {
         cursor = path.parent();
     }
     fs::create_dir_all(dir)?;
+    if missing.is_empty() {
+        missing.push(dir);
+    }
     for path in missing {
         sync_directory(parent(path))?;
     }
@@ -346,7 +391,8 @@ struct Inner {
     /// it.
     data: Option<File>,
     len: u64,
-    /// The file was created and its name not yet made durable.
+    /// The file's name may not be durable yet: true from the opening until
+    /// the first sync.
     directory_unsynced: bool,
     /// A write ended with `StorageUncertain`; only reads remain.
     poisoned: bool,
@@ -406,7 +452,11 @@ impl Record for FileRecord {
         if bytes.is_empty() {
             return Ok(());
         }
-        if !inner.exists {
+        if inner.exists {
+            inner
+                .data()
+                .map_err(|error| host("cannot open the record", &error))?;
+        } else {
             let data = OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -454,28 +504,36 @@ impl Record for FileRecord {
         if size == inner.len {
             return Ok(());
         }
+        inner
+            .data()
+            .map_err(|error| host("cannot open the record", &error))?;
         let len = inner.len;
+        let fail_after = inner.faults.check(&inner.name, Step::SetLenAfter);
         let cut = inner
             .faults
             .check(&inner.name, Step::SetLen)
             .and_then(|()| inner.data())
-            .and_then(|data| data.set_len(size));
+            .and_then(|data| data.set_len(size))
+            .and(fail_after);
         match cut {
             Ok(()) => {
                 inner.len = size;
                 Ok(())
             }
             Err(error) => {
-                let unchanged = inner
+                let actual = inner
                     .data()
                     .and_then(|data| data.metadata())
-                    .is_ok_and(|metadata| metadata.len() == len);
-                if unchanged {
-                    Err(host("cannot cut the record", &error))
-                } else {
-                    inner.poisoned = true;
-                    Err(uncertain("cannot cut the record", &error))
+                    .map(|metadata| metadata.len());
+                if matches!(actual, Ok(actual) if actual == len) {
+                    return Err(host("cannot cut the record", &error));
                 }
+                // Reads go on over what the file holds now, when known.
+                if let Ok(actual) = actual {
+                    inner.len = actual;
+                }
+                inner.poisoned = true;
+                Err(uncertain("cannot cut the record", &error))
             }
         }
     }

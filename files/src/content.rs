@@ -2,9 +2,9 @@
 //! The contract's [`ContentReader`] over a host file (core-contract.md
 //! §12.5).
 
-use crate::storage::within;
+use crate::storage::{read_exact_at, within};
 use std::fs::File;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io;
 use std::path::Path;
 use std::time::SystemTime;
 use unemu_core_api::{ContentReader, Error, ErrorKind};
@@ -14,7 +14,8 @@ use unemu_core_api::{ContentReader, Error, ErrorKind};
 ///
 /// The front end verifies the file's SHA-256 and length in full and then
 /// hands this object to a core. The object keeps the file open and never
-/// writes it.
+/// writes it. Reads name their offset and share no file cursor, so one
+/// object may be read from several threads at once.
 ///
 /// A change of the file behind the object is detected when it is cheap:
 /// after each read the object compares the file's length and modification
@@ -90,10 +91,7 @@ impl ContentReader for FileContent {
         if !within(offset, buf.len(), self.size) {
             return Err(Error::new(ErrorKind::Usage, "read past the end"));
         }
-        let mut file = &self.file;
-        let read = file
-            .seek(SeekFrom::Start(offset))
-            .and_then(|_| file.read_exact(buf));
+        let read = read_exact_at(&self.file, offset, buf);
         // A file cut short fails the read itself, so a failed read is
         // checked for a change too before it is called a host failure.
         if self.unchanged() == Some(false) {

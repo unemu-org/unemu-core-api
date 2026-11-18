@@ -12,8 +12,10 @@ contract 0.2.
 2. **The description.** A core id, its platforms, their config types and
    options, its notices. A platform that a person can start from a file
    lists its `ContentKind`s with their extensions, and at least one config
-   type, because `Core::identify` answers in one. `Features` list only
-   what every machine of the platform can do.
+   type, because `Core::identify` answers in one. A platform's `Features`
+   are the most a machine of it can do; each machine states its own in its
+   `MachineDescription`, which may list less, and a front end enables
+   controls from the machine's.
 3. **An honest description.** Every control a description promises works:
    no call that the core, platform or machine description promises
    answers `ErrorKind::Unsupported`. A core has a test that drives it only

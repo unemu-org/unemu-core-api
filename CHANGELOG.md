@@ -7,7 +7,7 @@ or **added**. Every release names the commit a consumer pins
 
 ## 0.2.0 — 2026-11-18 — contract 0.2
 
-Commit to pin: set when the release is tagged.
+Commit to pin: `56c4640146339e967b69925b724bbec0cf878df8` (tag `v0.2.0`)
 
 Storage handed in as objects, and what a second platform needs. The release
 as a whole is **breaking**: a core or a front end written for 0.1 must be

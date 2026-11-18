@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+[package]
+name = "unemu-core-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "The contract between front ends and emulator cores: a core that describes itself and creates machines, and the machine a front end drives."
+
+[package.metadata.unemu]
+layer = "contract"
+
+# No dependencies of any kind, also none for tests: nothing in the contract
+# may force a version of another crate on a core (core-contract.md §3.1).

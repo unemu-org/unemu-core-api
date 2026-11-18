@@ -1,0 +1,178 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+name: CI
+
+# The checks of docs/versioning.md and the contract's rules, on GitHub-hosted
+# Ubuntu runners. Runs on every push, on pull requests and on manual dispatch.
+# The crate has no dependency and no build script, so rustup (preinstalled on
+# the runners) is the whole toolchain setup.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer run on the same ref cancels an older one.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: "0"
+  RUSTFLAGS: ""
+  RUSTDOCFLAGS: ""
+
+jobs:
+  lint:
+    name: Format and lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+          rustc --version
+      - name: Cache target
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: target
+          key: target-v1-lint-${{ runner.os }}-${{ hashFiles('Cargo.toml', 'Cargo.lock') }}
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+  test:
+    name: Tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version
+      - name: Cache target
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: target
+          key: target-v1-test-${{ runner.os }}-${{ hashFiles('Cargo.toml', 'Cargo.lock') }}
+      - name: Tests
+        run: cargo test --locked
+      - name: Tests (all features)
+        run: cargo test --locked --all-features
+
+  docs:
+    name: Documentation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      # Every public item has its comment, and every intra-doc link resolves.
+      RUSTDOCFLAGS: "-D warnings"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version
+      - name: Documentation
+        run: cargo doc --locked --no-deps --all-features
+
+  no-dependency:
+    name: No dependency
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          jq --version
+      - name: No dependency of any kind
+        run: bash scripts/no-dependency.sh
+
+  no-host:
+    name: No host (wasm32)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --target wasm32-unknown-unknown
+          rustup default stable
+          rustc --version
+      # The contract builds where there is no operating system.
+      - name: Build for wasm32-unknown-unknown
+        run: cargo build --locked -p unemu-core-api --target wasm32-unknown-unknown
+
+  oldest-toolchain:
+    name: Oldest toolchain
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      # The rust-version the manifest states, read from cargo metadata so the
+      # job follows the manifest when it is lowered.
+      - name: Toolchain
+        id: msrv
+        run: |
+          rustup toolchain install stable --profile minimal
+          version=$(cargo +stable metadata --format-version 1 --no-deps --locked |
+            jq -r '.packages[] | select(.name == "unemu-core-api") | .rust_version')
+          if [[ -z $version || $version == null ]]; then
+            echo "Cargo.toml states no rust-version" >&2
+            exit 1
+          fi
+          rustup toolchain install "$version" --profile minimal
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Build and test with the oldest toolchain
+        env:
+          MSRV: ${{ steps.msrv.outputs.version }}
+        run: |
+          cargo +"$MSRV" --version
+          cargo +"$MSRV" build --locked --all-targets --all-features
+          cargo +"$MSRV" test --locked --all-features
+
+  publication:
+    name: Publication
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Publication guard self-test
+        run: bash scripts/publication-guard.sh --self-test
+      - name: Publication guard
+        run: bash scripts/publication-guard.sh

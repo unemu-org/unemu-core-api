@@ -112,6 +112,26 @@ the contract names no file system or path type.
   `std::process`, `std::net`, `std::thread`, `std::time::Instant` and
   `std::time::SystemTime`, directly or in a grouped `use`, renamed or not.
   The job also builds for wasm32 with all features.
+- **added** The crate `unemu-core-files` (in `files/`, the workspace's
+  second member, version 0.2.0, depending only on the contract): the
+  contract's objects over host files, for front ends and a core's own
+  command line, never for a core library. `FileStorage::open(dir)` is a
+  directory of records, one file per record, the name mapped by
+  `file_name` and back by `record_name` (Windows device names such as
+  `con` and `nul.bin` gain `_` after the device part: `con_`,
+  `nul_.bin`). A record is held through an exclusive lock on its own lock
+  file, across storages and programs, and a held record fails to open
+  with `Usage`. `sync` is `sync_all` (`F_FULLFSYNC` on Apple's systems)
+  and syncs the directory after a record's creation on Unix; a commit
+  writes a temporary sibling, syncs it, renames it over the record and
+  makes the rename durable (a directory sync on Unix; on Windows, which
+  has no directory sync in the standard library, a second sync of the
+  renamed file). The failure rules of `Record` are held; temporary files
+  a crash left are removed when the record is opened. `FileContent` is a
+  `ContentReader` over a file of verified length that fails a read with
+  `Content` when the file's length or modification time changed. Its
+  tests run on Linux, macOS and Windows; `no-dependency.sh` and
+  `no-host.sh` keep checking the contract's package only.
 - `docs/conformance.md` is the checklist of contract 0.2.
 
 ## 0.1.0 — contract 0.1

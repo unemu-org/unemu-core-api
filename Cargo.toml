@@ -22,8 +22,10 @@ publish = false
 # and front ends. No dependency comes with it.
 test-support = []
 
-# The root package is also a workspace, so a second member can join later
-# without moving this one.
+# The root package is also a workspace. Its second member, `files`, is the
+# contract's objects over host files; it depends on this package, never the
+# other way round, and the checks of "no dependency" and "no host" stay with
+# this package.
 [workspace]
-members = ["."]
+members = [".", "files"]
 resolver = "2"

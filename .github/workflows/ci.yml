@@ -2,8 +2,10 @@
 name: CI
 
 # The checks of docs/versioning.md and the contract's rules, on GitHub-hosted
-# Ubuntu runners. Runs on every push, on pull requests and on manual dispatch.
-# The crate has no dependency and no build script, so rustup (preinstalled on
+# Ubuntu runners; the tests also on macOS and Windows, because
+# unemu-core-files (files/) has code for each. Runs on every push, on pull
+# requests and on manual dispatch. The workspace has no dependency from
+# outside this repository and no build script, so rustup (preinstalled on
 # the runners) is the whole toolchain setup.
 on:
   push:
@@ -47,16 +49,20 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: target
-          key: target-v1-lint-${{ runner.os }}-${{ hashFiles('Cargo.toml', 'Cargo.lock') }}
+          key: target-v1-lint-${{ runner.os }}-${{ hashFiles('Cargo.toml', 'files/Cargo.toml', 'Cargo.lock') }}
       - name: Format
         run: cargo fmt --check
       - name: Clippy
-        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
   test:
-    name: Tests
-    runs-on: ubuntu-24.04
+    name: Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2025]
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -71,11 +77,11 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: target
-          key: target-v1-test-${{ runner.os }}-${{ hashFiles('Cargo.toml', 'Cargo.lock') }}
+          key: target-v1-test-${{ runner.os }}-${{ hashFiles('Cargo.toml', 'files/Cargo.toml', 'Cargo.lock') }}
       - name: Tests
-        run: cargo test --locked
+        run: cargo test --locked --workspace
       - name: Tests (all features)
-        run: cargo test --locked --all-features
+        run: cargo test --locked --workspace --all-features
 
   docs:
     name: Documentation
@@ -95,7 +101,7 @@ jobs:
           rustup default stable
           rustc --version
       - name: Documentation
-        run: cargo doc --locked --no-deps --all-features
+        run: cargo doc --locked --workspace --no-deps --all-features
 
   no-dependency:
     name: No dependency
@@ -129,7 +135,9 @@ jobs:
           rustup default stable
           rustc --version
       # The contract names no host interface of std (files, paths, the
-      # environment, processes, the network, threads, the host clock).
+      # environment, processes, the network, threads, the host clock). The
+      # check reads src/ only: files/ touches the host by design, and only
+      # the contract's package is built for wasm32.
       - name: No host interface, self-test
         run: bash scripts/no-host.sh --self-test
       - name: No host interface
@@ -168,8 +176,8 @@ jobs:
           MSRV: ${{ steps.msrv.outputs.version }}
         run: |
           cargo +"$MSRV" --version
-          cargo +"$MSRV" build --locked --all-targets --all-features
-          cargo +"$MSRV" test --locked --all-features
+          cargo +"$MSRV" build --locked --workspace --all-targets --all-features
+          cargo +"$MSRV" test --locked --workspace --all-features
 
   publication:
     name: Publication

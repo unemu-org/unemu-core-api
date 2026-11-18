@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+[package]
+name = "unemu-core-files"
+# Released with the contract it implements: 0.2.0 implements CONTRACT 0.2.
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.99"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/unemu-org/unemu-core-api"
+description = "The storage and content objects of unemu-core-api over host files, for front ends and a core's own command line."
+readme = "../README.md"
+keywords = ["emulator", "emulation", "frontend", "storage"]
+categories = ["emulators", "filesystem"]
+publish = false
+
+# Only the contract, from this repository; the standard library does the rest
+# (file locks, directory listing, rename).
+[dependencies]
+unemu-core-api = { version = "0.2.0", path = ".." }

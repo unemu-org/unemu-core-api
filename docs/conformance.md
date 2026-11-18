@@ -81,7 +81,8 @@ contract 0.2.
 14. **Embeddable.** The core and what it links forbid unsafe code where
     they can, and add no crate that touches the host (files, network,
     windows, audio devices) to the library a front end links. A core's
-    own command line is a separate crate, which may open files.
+    own command line is a separate crate, which may open files, through
+    `unemu-core-files` for the contract's objects.
 15. **The hand-over.** A core names to the front end the revision to pin,
     the contract revision it was built against, and the licences of
     everything it links.

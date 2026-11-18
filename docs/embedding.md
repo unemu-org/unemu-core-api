@@ -16,11 +16,36 @@ unemu-core-api = { version = "0.2", git = "https://github.com/unemu-org/unemu-co
   ```toml
   [patch."https://github.com/unemu-org/unemu-core-api"]
   unemu-core-api = { path = "<your checkout>" }
+  # Only when you depend on it too:
+  unemu-core-files = { path = "<your checkout>/files" }
   ```
 
 - A core's or a front end's tests may enable the feature `test-support`
   (a storage and content in memory) in `[dev-dependencies]`, on the same
   URL and revision. A library never enables it for its users.
+
+## Storage and content over host files
+
+The contract hands storage and content to a core as objects
+(`Storage`, `Record`, `ContentReader`). `unemu-core-files`, the second
+crate of this repository, is those objects over host files:
+`FileStorage` and `FileContent`.
+
+- **Who links it:** a front end, and a core's own command line, which is
+  a front end of one core and lives in a crate of its own. Both name it
+  by the same URL and revision as the contract:
+
+  ```toml
+  unemu-core-files = { version = "0.2", git = "https://github.com/unemu-org/unemu-core-api", rev = "<the same revision>" }
+  ```
+
+- **Who never links it:** a core library. A core takes the objects the
+  front end hands to `Core::create`, so it builds and runs where there
+  are no files, and an embedder with its own storage (a database, a
+  browser's storage) leaves this crate out.
+- A record is one file of the storage's directory, named after the
+  record; the crate's documentation states the lock, the durability on
+  each host and how Windows device names (`con`, `nul`) are mapped.
 
 ## One copy in every build
 

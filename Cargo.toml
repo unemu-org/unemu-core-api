@@ -1,16 +1,24 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: MIT OR Apache-2.0
 [package]
 name = "unemu-core-api"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-rust-version.workspace = true
-repository.workspace = true
-publish.workspace = true
+# The package version is the contract's: 0.1.0 is CONTRACT 0.1 (docs/versioning.md).
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.99"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/unemu-org/unemu-core-api"
 description = "The contract between front ends and emulator cores: a core that describes itself and creates machines, and the machine a front end drives."
-
-[package.metadata.unemu]
-layer = "contract"
+readme = "README.md"
+keywords = ["emulator", "emulation", "frontend", "core", "contract"]
+categories = ["emulators"]
+# Consumers pin a git revision until 1.0; the crate goes to crates.io from 1.0.
+publish = false
 
 # No dependencies of any kind, also none for tests: nothing in the contract
-# may force a version of another crate on a core (core-contract.md §3.1).
+# may force a version of another crate on a core.
+
+# The root package is also a workspace, so a second member can join later
+# without moving this one.
+[workspace]
+members = ["."]
+resolver = "2"

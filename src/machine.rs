@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! The running machine: its description, its time and the one trait a front
 //! end drives (core-contract.md §3.5 to §3.10).
 

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! The one error type of the contract, and the messages a core reports
 //! (core-contract.md §3.10).
 //!

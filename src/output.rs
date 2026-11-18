@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Picture and sound out (core-contract.md §3.6).
 //!
 //! The picture is pixels; a text mode, its cells and its fonts are the

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Reset and finish (core-contract.md §3.9).
 //!
 //! Pause has no call: the front end stops calling [`crate::Machine::run`]

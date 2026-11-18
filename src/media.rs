@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Media slots and catalogues of a running machine (core-contract.md §3.8).
 //!
 //! A slot is a place a medium goes: a floppy drive, a fixed disk, a

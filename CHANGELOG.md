@@ -5,7 +5,7 @@ or **added**. Every release names the commit a consumer pins
 ([`docs/embedding.md`](docs/embedding.md)); the version rules are in
 [`docs/versioning.md`](docs/versioning.md).
 
-## 0.2.0 (unreleased) — contract 0.2
+## 0.2.0 — 2026-11-18 — contract 0.2
 
 Commit to pin: set when the release is tagged.
 

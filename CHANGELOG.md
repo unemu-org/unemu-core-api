@@ -7,7 +7,7 @@ or **added**. Every release names the commit a consumer pins
 
 ## 0.3.0 — 2026-11-20 — contract 0.3
 
-Commit to pin: set when the release is tagged.
+Commit to pin: `0d490fcb0b97320ac785b12f84a5c49e72f28b1d` (tag `v0.3.0`)
 
 - **breaking** CONTRACT is 0.3 and the package version 0.3.0. A front end
   of 0.3 refuses a core that states 0.2 (`ContractVersion::drives`); a core

@@ -39,7 +39,7 @@ Pin the commit of a release tag, as an exact revision:
 
 ```toml
 # The contract between front ends and cores, at the commit of release v0.3.0.
-unemu-core-api = { version = "0.3", git = "https://github.com/unemu-org/unemu-core-api", rev = "<the 40 hex digits of the tag's commit>" }
+unemu-core-api = { version = "0.3", git = "https://github.com/unemu-org/unemu-core-api", rev = "0d490fcb0b97320ac785b12f84a5c49e72f28b1d" }
 ```
 
 Never a branch, never a tag name, never a `path` dependency and never a
@@ -62,7 +62,7 @@ in memory. Enable it for a core's or a front end's tests only:
 
 ```toml
 [dev-dependencies]
-unemu-core-api = { version = "0.3", git = "https://github.com/unemu-org/unemu-core-api", rev = "<the 40 hex digits of the tag's commit>", features = ["test-support"] }
+unemu-core-api = { version = "0.3", git = "https://github.com/unemu-org/unemu-core-api", rev = "0d490fcb0b97320ac785b12f84a5c49e72f28b1d", features = ["test-support"] }
 ```
 
 ## Storage and content over host files
@@ -79,7 +79,7 @@ and Windows. It is versioned with the contract and pinned at the same
 revision:
 
 ```toml
-unemu-core-files = { version = "0.3", git = "https://github.com/unemu-org/unemu-core-api", rev = "<the 40 hex digits of the tag's commit>" }
+unemu-core-files = { version = "0.3", git = "https://github.com/unemu-org/unemu-core-api", rev = "0d490fcb0b97320ac785b12f84a5c49e72f28b1d" }
 ```
 
 - [`docs/versioning.md`](docs/versioning.md): what a version number means

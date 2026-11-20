@@ -4,7 +4,7 @@ A core and a front end name the crate the same way: by the git URL and the
 exact commit of a release tag.
 
 ```toml
-unemu-core-api = { version = "0.3", git = "https://github.com/unemu-org/unemu-core-api", rev = "<the 40 hex digits of the tag's commit>" }
+unemu-core-api = { version = "0.3", git = "https://github.com/unemu-org/unemu-core-api", rev = "0d490fcb0b97320ac785b12f84a5c49e72f28b1d" }
 ```
 
 - An exact revision, never a branch and never a tag name: a tag can be
@@ -36,7 +36,7 @@ crate of this repository, is those objects over host files:
   by the same URL and revision as the contract:
 
   ```toml
-  unemu-core-files = { version = "0.3", git = "https://github.com/unemu-org/unemu-core-api", rev = "<the same revision>" }
+  unemu-core-files = { version = "0.3", git = "https://github.com/unemu-org/unemu-core-api", rev = "0d490fcb0b97320ac785b12f84a5c49e72f28b1d" }
   ```
 
 - **Who never links it:** a core library. A core takes the objects the

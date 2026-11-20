@@ -1,7 +1,7 @@
 # Versioning
 
-The package version is the contract's: release `0.2.0` is
-`CONTRACT` 0.2, and `MAJOR.MINOR` of every release equals the
+The package version is the contract's: release `0.3.0` is
+`CONTRACT` 0.3, and `MAJOR.MINOR` of every release equals the
 `ContractVersion` it defines.
 
 ## Before 1.0

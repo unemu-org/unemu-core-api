@@ -23,8 +23,9 @@ reaches a core through `Core::identify`, which writes the config
 is no operating system.
 
 Cores that implement it: [unemupc](https://github.com/unemu-org/unemupc),
-an IBM PC/AT-class machine, implements contract 0.1 and moves to 0.2 next.
-The front end that drives it lives in unemupc's repository for now.
+an IBM PC/AT-class machine, and [unemunes](https://github.com/unemu-org/unemunes),
+an NES, implement contract 0.2 and move to 0.3 next.
+The front end lives in unemupc's repository for now.
 
 The normative text is the crate's documentation comments and
 [`CHANGELOG.md`](CHANGELOG.md). Comments that cite `core-contract.md §N`
@@ -37,8 +38,8 @@ core and a front end must do.
 Pin the commit of a release tag, as an exact revision:
 
 ```toml
-# The contract between front ends and cores, at the commit of release v0.2.0.
-unemu-core-api = { version = "0.2", git = "https://github.com/unemu-org/unemu-core-api", rev = "56c4640146339e967b69925b724bbec0cf878df8" }
+# The contract between front ends and cores, at the commit of release v0.3.0.
+unemu-core-api = { version = "0.3", git = "https://github.com/unemu-org/unemu-core-api", rev = "<the 40 hex digits of the tag's commit>" }
 ```
 
 Never a branch, never a tag name, never a `path` dependency and never a
@@ -61,7 +62,7 @@ in memory. Enable it for a core's or a front end's tests only:
 
 ```toml
 [dev-dependencies]
-unemu-core-api = { version = "0.2", git = "https://github.com/unemu-org/unemu-core-api", rev = "56c4640146339e967b69925b724bbec0cf878df8", features = ["test-support"] }
+unemu-core-api = { version = "0.3", git = "https://github.com/unemu-org/unemu-core-api", rev = "<the 40 hex digits of the tag's commit>", features = ["test-support"] }
 ```
 
 ## Storage and content over host files
@@ -78,7 +79,7 @@ and Windows. It is versioned with the contract and pinned at the same
 revision:
 
 ```toml
-unemu-core-files = { version = "0.2", git = "https://github.com/unemu-org/unemu-core-api", rev = "56c4640146339e967b69925b724bbec0cf878df8" }
+unemu-core-files = { version = "0.3", git = "https://github.com/unemu-org/unemu-core-api", rev = "<the 40 hex digits of the tag's commit>" }
 ```
 
 - [`docs/versioning.md`](docs/versioning.md): what a version number means

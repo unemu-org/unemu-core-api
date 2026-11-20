@@ -5,8 +5,13 @@ or **added**. Every release names the commit a consumer pins
 ([`docs/embedding.md`](docs/embedding.md)); the version rules are in
 [`docs/versioning.md`](docs/versioning.md).
 
-## Unreleased — next minor 0.3.0
+## 0.3.0 — 2026-11-20 — contract 0.3
 
+Commit to pin: set when the release is tagged.
+
+- **breaking** CONTRACT is 0.3 and the package version 0.3.0. A front end
+  of 0.3 refuses a core that states 0.2 (`ContractVersion::drives`); a core
+  moves by stating 0.3, nothing else of the contract changed.
 - **added** `unemu-core-files::FileRecord::{open, open_with, inspect}`:
   a contract record at an arbitrary path, sharing the record and replacement
   implementation with `FileStorage`. The format stays with the consumer:
@@ -21,9 +26,6 @@ or **added**. Every release names the commit a consumer pins
   borrowed retention injection (`FileRecord::replace_with`). `FileError`
   preserves opening stages and host errors; uncertain writes poison further
   mutations while reads remain available.
-  This callable front-end API belongs to the next minor, **0.3.0**, under
-  `docs/versioning.md`. Package versions remain at the last release until
-  release preparation. No release tag or commit to pin exists yet.
 
 ## 0.2.0 — 2026-11-18 — contract 0.2
 

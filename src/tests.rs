@@ -6,11 +6,11 @@ use std::rc::Rc;
 
 #[test]
 fn a_front_end_drives_only_its_own_minor_during_major_zero() {
-    let front = ContractVersion::new(0, 2);
-    assert!(front.drives(ContractVersion::new(0, 2)));
-    assert!(!front.drives(ContractVersion::new(0, 1)));
-    assert!(!front.drives(ContractVersion::new(0, 3)));
-    assert!(!front.drives(ContractVersion::new(1, 2)));
+    let front = ContractVersion::new(0, 3);
+    assert!(front.drives(ContractVersion::new(0, 3)));
+    assert!(!front.drives(ContractVersion::new(0, 2)));
+    assert!(!front.drives(ContractVersion::new(0, 4)));
+    assert!(!front.drives(ContractVersion::new(1, 3)));
 }
 
 #[test]
@@ -24,14 +24,15 @@ fn from_major_one_a_front_end_drives_every_minor_of_its_major() {
 }
 
 #[test]
-fn this_source_is_contract_zero_two_and_drives_itself() {
-    assert_eq!(CONTRACT, ContractVersion::new(0, 2));
+fn this_source_is_contract_zero_three_and_drives_itself() {
+    assert_eq!(CONTRACT, ContractVersion::new(0, 3));
     assert!(CONTRACT.drives(CONTRACT));
-    assert_eq!(CONTRACT.to_string(), "0.2");
+    assert_eq!(CONTRACT.to_string(), "0.3");
 }
 
 #[test]
-fn this_source_refuses_a_core_written_for_contract_zero_one() {
+fn this_source_refuses_a_core_written_for_contract_zero_two() {
+    assert!(!CONTRACT.drives(ContractVersion::new(0, 2)));
     assert!(!CONTRACT.drives(ContractVersion::new(0, 1)));
 }
 
@@ -250,7 +251,7 @@ static PLATFORMS: [PlatformDescription; 1] = [PlatformDescription::new("counter"
     .with_content(&TAPE_KINDS)];
 
 static DESCRIPTION: CoreDescription =
-    CoreDescription::new(ContractVersion::new(0, 2), "counter", "Counter", "0.0.2")
+    CoreDescription::new(ContractVersion::new(0, 3), "counter", "Counter", "0.0.2")
         .with_platforms(&PLATFORMS)
         .with_notices(&[Notice::new("nothing", "no third-party parts")]);
 
@@ -490,7 +491,7 @@ fn validate_refuses_a_broken_config_with_diagnostics() {
 struct BareCore;
 
 static BARE: CoreDescription =
-    CoreDescription::new(ContractVersion::new(0, 2), "bare", "Bare", "0.0.1");
+    CoreDescription::new(ContractVersion::new(0, 3), "bare", "Bare", "0.0.1");
 
 impl Core for BareCore {
     fn description(&self) -> &CoreDescription {

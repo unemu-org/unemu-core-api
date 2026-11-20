@@ -3,12 +3,12 @@
 The documentation comments say what each call must do. This list is what
 they cannot say about a core as a whole. It is the checklist a new core,
 and every change to a core, is reviewed against. It is the list of
-contract 0.2.
+contract 0.3.
 
 1. **The dependency.** The crate by the exact revision of a release tag
    ([`embedding.md`](embedding.md)), never a path, a branch or a copy; a
    gitignored patch for local work. `CoreDescription::implements` is a
-   literal, such as `ContractVersion::new(0, 2)`.
+   literal, such as `ContractVersion::new(0, 3)`.
 2. **The description.** A core id, its platforms, their config types and
    options, its notices. A platform that a person can start from a file
    lists its `ContentKind`s with their extensions, and at least one config

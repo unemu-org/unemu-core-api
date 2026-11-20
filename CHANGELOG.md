@@ -5,6 +5,26 @@ or **added**. Every release names the commit a consumer pins
 ([`docs/embedding.md`](docs/embedding.md)); the version rules are in
 [`docs/versioning.md`](docs/versioning.md).
 
+## Unreleased — next minor 0.3.0
+
+- **added** `unemu-core-files::FileRecord::{open, open_with, inspect}`:
+  a contract record at an arbitrary path, sharing the record and replacement
+  implementation with `FileStorage`. The format stays with the consumer:
+  expected initial bytes and optional protected-file metadata are the inputs.
+  `PathLock` holds the stable `FILE.lock`, supports shared inspection and an
+  explicit absent-lock fallback in a read-only directory. Initial publication
+  uses `FILE.create-N.tmp`, a file barrier and a no-clobber hard link;
+  replacement uses `FILE.retain-N.tmp`, preserves permissions, synchronizes
+  and atomically renames. Cleanup checks opened and current inode identities,
+  preserves protected aliases and only removes creation prefixes that match.
+  `Filesystem` and `FileIo` expose the host operations, including cleanup and
+  borrowed retention injection (`FileRecord::replace_with`). `FileError`
+  preserves opening stages and host errors; uncertain writes poison further
+  mutations while reads remain available.
+  This callable front-end API belongs to the next minor, **0.3.0**, under
+  `docs/versioning.md`. Package versions remain at the last release until
+  release preparation. No release tag or commit to pin exists yet.
+
 ## 0.2.0 — 2026-11-18 — contract 0.2
 
 Commit to pin: `56c4640146339e967b69925b724bbec0cf878df8` (tag `v0.2.0`)

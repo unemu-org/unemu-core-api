@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! The contract's [`Storage`], [`Record`] and [`Replacement`] over a
-//! directory of host files (core-contract.md §12.5).
+//! directory of host files or an arbitrary path (core-contract.md §12.5).
 
+#[cfg(unix)]
+use crate::host::same_file;
 use crate::names::file_name;
+use crate::path::{self, stage};
+use crate::{FileError, FileIo, Filesystem, HostFilesystem, PathLock};
 use std::cell::RefCell;
-use std::fs::{self, File, OpenOptions, TryLockError};
+use std::fs::{self, File, Metadata, OpenOptions, TryLockError};
 use std::io::{self, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -14,7 +18,8 @@ use unemu_core_api::{Error, ErrorKind, Record, Replacement, Storage};
 ///
 /// Each record is one file, named after the record ([`crate::file_name`]).
 /// A record that does not exist opens empty, and its file appears on the
-/// first write: an `append` of at least one byte, or a commit.
+/// first write: an `append` of at least one byte, or a commit. Names reserved
+/// for engine sidecars (see [`FileRecord`]) fail with [`ErrorKind::Usage`].
 ///
 /// # Exclusive use
 ///
@@ -30,6 +35,10 @@ use unemu_core_api::{Error, ErrorKind, Record, Replacement, Storage};
 /// programs lock two different files of the same name. A host or file
 /// system without file locks fails the open with [`ErrorKind::Storage`]; it
 /// never opens without the lock.
+///
+/// Do not use `FileStorage` and [`FileRecord::open`] on the same file:
+/// path records lock `FILE.lock`, while this storage locks `FILE_lock`, so
+/// the two APIs do not exclude each other.
 ///
 /// The locks are those of the host's own file system (`flock` on Unix,
 /// `LockFileEx` on Windows), meant for a directory on a local disk. On a
@@ -118,10 +127,32 @@ impl FileStorage {
     }
 }
 
+// Named records historically create replacements with 0666 filtered by the
+// umask. Keep that policy separate from path records' private initial files.
+struct StorageFilesystem;
+impl Filesystem for StorageFilesystem {
+    fn create_new(
+        &self,
+        path: &Path,
+        _permissions: Option<&fs::Permissions>,
+    ) -> io::Result<Box<dyn FileIo>> {
+        Ok(Box::new(
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(path)?,
+        ))
+    }
+}
+
 impl Storage for FileStorage {
     fn open(&self, name: &str) -> Result<Box<dyn Record>, Error> {
         let file =
             file_name(name).ok_or_else(|| Error::new(ErrorKind::Usage, "not a record name"))?;
+        if path::is_reserved_path(Path::new(&file)) {
+            return Err(usage("reserved sidecar path"));
+        }
         let lock = Lock::take(&self.dir.join(format!("{file}_lock")))?;
         remove_temporaries(&self.dir, &file);
         let path = self.dir.join(&file);
@@ -144,8 +175,13 @@ impl Storage for FileStorage {
                 file,
                 path,
                 exists: data.is_some(),
-                data,
+                data: data.map(|file| Box::new(file) as Box<dyn FileIo>),
+                host: Rc::new(StorageFilesystem),
+                initial: None,
+                protected: None,
+                read_only: false,
                 len,
+                len_unknown: false,
                 // An earlier opening may have created the file and crashed
                 // before it made the name durable.
                 directory_unsynced: true,
@@ -153,7 +189,7 @@ impl Storage for FileStorage {
                 released: false,
                 replacement: None,
                 replacements: 0,
-                lock: Some(lock),
+                lock: Some(Box::new(lock)),
                 faults: self.faults.clone(),
             })),
         }))
@@ -260,7 +296,12 @@ pub(crate) fn read_exact_at(file: &File, mut offset: u64, mut buf: &mut [u8]) ->
 
 /// Write `bytes` at `offset`; when `fail` is an error, write half of them
 /// and answer it, as a host that ran out of space would.
-fn write_at(mut file: &File, offset: u64, bytes: &[u8], fail: io::Result<()>) -> io::Result<()> {
+fn write_at(
+    file: &mut dyn FileIo,
+    offset: u64,
+    bytes: &[u8],
+    fail: io::Result<()>,
+) -> io::Result<()> {
     file.seek(SeekFrom::Start(offset))?;
     if let Err(error) = fail {
         file.write_all(&bytes[..bytes.len() / 2])?;
@@ -366,18 +407,6 @@ fn sync_directory(_dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Make a commit's rename durable: the directory on Unix, and on Windows a
-/// second sync of the renamed file, which needs write access there.
-#[cfg(unix)]
-fn sync_rename(dir: &Path, _path: &Path) -> io::Result<()> {
-    sync_directory(dir)
-}
-
-#[cfg(not(unix))]
-fn sync_rename(_dir: &Path, path: &Path) -> io::Result<()> {
-    OpenOptions::new().write(true).open(path)?.sync_all()
-}
-
 /// What a record object and its replacement share.
 struct Inner {
     name: String,
@@ -389,8 +418,13 @@ struct Inner {
     exists: bool,
     /// The record's file, opened again on demand after a commit replaced
     /// it.
-    data: Option<File>,
+    data: Option<Box<dyn FileIo>>,
+    host: Rc<dyn Filesystem>,
+    initial: Option<Vec<u8>>,
+    protected: Option<Metadata>,
+    read_only: bool,
     len: u64,
+    len_unknown: bool,
     /// The file's name may not be durable yet: true from the opening until
     /// the first sync.
     directory_unsynced: bool,
@@ -401,20 +435,25 @@ struct Inner {
     /// The living replacement, by its number within this opening.
     replacement: Option<u64>,
     replacements: u64,
-    lock: Option<Lock>,
+    lock: Option<Box<dyn std::any::Any>>,
     faults: Faults,
 }
 
 impl Inner {
-    fn data(&mut self) -> io::Result<&File> {
-        let file = match self.data.take() {
-            Some(file) => file,
-            None => OpenOptions::new().read(true).write(true).open(&self.path)?,
-        };
-        Ok(self.data.insert(file))
+    fn data(&mut self) -> io::Result<&mut dyn FileIo> {
+        if self.data.is_none() {
+            self.data = Some(self.host.open(&self.path, !self.read_only)?);
+        }
+        match self.data.as_mut() {
+            Some(file) => Ok(file.as_mut()),
+            None => Err(io::Error::other("record is not open")),
+        }
     }
 
     fn check_writable(&self) -> Result<(), Error> {
+        if self.read_only {
+            return Err(usage("an inspection record is read-only"));
+        }
         if self.poisoned {
             return Err(reopen_first());
         }
@@ -422,19 +461,64 @@ impl Inner {
     }
 }
 
-/// A record held through [`FileStorage`].
-struct FileRecord {
+/// A contract record over an arbitrary host path, or a named FileStorage
+/// record. Both use the same append, rollback, truncation, poisoning and
+/// replacement implementation.
+///
+/// Path records hold a stable `FILE.lock`. A missing record reads empty;
+/// append is refused until a replacement commits exactly `initial` bytes.
+/// Creation writes `FILE.create-N.tmp`, flushes and syncs it, publishes with
+/// a no-clobber hard link, removes its temporary link, checks the canonical
+/// path, cleans orphans and syncs the directory. A replacement of an existing
+/// file uses `FILE.retain-N.tmp`, preserves its exact permissions, syncs,
+/// atomically renames and syncs the directory. Numbers start at zero and skip
+/// occupied names. No journal format is interpreted.
+///
+/// Record paths must not name engine sidecars: `.lock`, `_lock`,
+/// `.create-`/`.retain-` names and `_N.tmp` replacements are reserved, also
+/// through symbolic links. Opening one fails with Usage. Do not use these
+/// path methods on a file also accessed through FileStorage: its `FILE_lock`
+/// and this API's `FILE.lock` do not exclude each other.
+///
+/// Opening an existing path under an exclusive lock verifies its canonical
+/// path, cleans leftovers, then syncs the directory. Creation leftovers are
+/// removed only when their bytes are a prefix of `initial`; retention
+/// leftovers may contain arbitrary bytes. Cleanup preserves symlinks, special
+/// files, changed identities and aliases of `protected`. The directory must
+/// be trusted (see Filesystem). A protected file is also refused as a writable
+/// record. On hosts without inode identity, cleanup preserves all candidates
+/// and protected writable opens are refused.
+///
+/// Failures follow FileStorage and Record: an append is rolled back when
+/// possible; an unconfirmed cut or barrier poisons writes. A rename failure
+/// is conservatively StorageUncertain, because it may have taken place.
+/// Reads then reopen the path and see the old or new whole file. Errors name
+/// the failed stage; writes after uncertainty fail with Usage until reopen.
+/// Replacements cannot commit after their record is dropped and cannot
+/// remove another opening's temporary file. Inspection records perform no
+/// cleanup or barrier and refuse every mutation, including empty ones.
+pub struct FileRecord {
     inner: Rc<RefCell<Inner>>,
 }
 
 impl Record for FileRecord {
     fn size(&self) -> Result<u64, Error> {
-        Ok(self.inner.borrow().len)
+        let mut inner = self.inner.borrow_mut();
+        if inner.len_unknown {
+            let metadata = inner
+                .data()
+                .and_then(|file| file.metadata())
+                .map_err(|e| host("metadata after uncertain publication", &e))?;
+            inner.len = metadata.len();
+            inner.len_unknown = false;
+        }
+        Ok(inner.len)
     }
 
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), Error> {
+        let len = self.size()?;
         let mut inner = self.inner.borrow_mut();
-        if !within(offset, buf.len(), inner.len) {
+        if !within(offset, buf.len(), len) {
             return Err(usage("read past the end"));
         }
         if buf.is_empty() {
@@ -442,13 +526,19 @@ impl Record for FileRecord {
         }
         inner
             .data()
-            .and_then(|data| read_exact_at(data, offset, buf))
+            .and_then(|data| {
+                data.seek(SeekFrom::Start(offset))?;
+                data.read_exact(buf)
+            })
             .map_err(|error| host("cannot read the record", &error))
     }
 
     fn append(&mut self, bytes: &[u8]) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
         inner.check_writable()?;
+        if !inner.exists && inner.initial.is_some() {
+            return Err(usage("a path record is created by a replacement"));
+        }
         if bytes.is_empty() {
             return Ok(());
         }
@@ -464,7 +554,7 @@ impl Record for FileRecord {
                 .truncate(false)
                 .open(&inner.path)
                 .map_err(|error| host("cannot create the record", &error))?;
-            inner.data = Some(data);
+            inner.data = Some(Box::new(data));
             inner.exists = true;
             inner.directory_unsynced = true;
         }
@@ -548,7 +638,10 @@ impl Record for FileRecord {
             .faults
             .check(&inner.name, Step::SyncFile)
             .and_then(|()| inner.data())
-            .and_then(File::sync_all);
+            .and_then(|file| {
+                file.flush()?;
+                file.sync_all()
+            });
         if let Err(error) = synced {
             inner.poisoned = true;
             return Err(uncertain("cannot make the record durable", &error));
@@ -557,7 +650,7 @@ impl Record for FileRecord {
             let synced = inner
                 .faults
                 .check(&inner.name, Step::SyncDirectory)
-                .and_then(|()| sync_directory(&inner.dir));
+                .and_then(|()| inner.host.sync_directory(&inner.path));
             if let Err(error) = synced {
                 inner.poisoned = true;
                 return Err(uncertain("cannot make the record's name durable", &error));
@@ -568,23 +661,7 @@ impl Record for FileRecord {
     }
 
     fn replace(&mut self) -> Result<Box<dyn Replacement>, Error> {
-        let mut inner = self.inner.borrow_mut();
-        inner.check_writable()?;
-        if inner.replacement.is_some() {
-            return Err(usage("the record already has a replacement"));
-        }
-        let (temporary, file) = create_temporary(&inner.dir, &inner.file)
-            .map_err(|error| host("cannot start a replacement", &error))?;
-        inner.replacements += 1;
-        let number = inner.replacements;
-        inner.replacement = Some(number);
-        Ok(Box::new(FileReplacement {
-            inner: Rc::clone(&self.inner),
-            number,
-            temporary: Some(temporary),
-            file: Some(file),
-            len: 0,
-        }))
+        self.start_replacement(None)
     }
 }
 
@@ -599,49 +676,36 @@ impl Drop for FileRecord {
     }
 }
 
-/// A new temporary sibling `RECORD_N.tmp`, with the first `N` that is free.
-/// A name Windows still holds for a removed file that a released
-/// replacement keeps open answers "permission denied", so that is skipped
-/// like a name in use.
-fn create_temporary(dir: &Path, record: &str) -> io::Result<(PathBuf, File)> {
-    let mut last = io::Error::other("no free temporary name");
-    for number in 0..64 {
-        let path = dir.join(format!("{record}_{number}.tmp"));
-        match OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(file) => return Ok((path, file)),
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::AlreadyExists | io::ErrorKind::PermissionDenied
-                ) =>
-            {
-                last = error;
-            }
-            Err(error) => return Err(error),
+enum ReplacementHost<'a> {
+    Owned(Rc<dyn Filesystem>),
+    Borrowed(&'a dyn Filesystem),
+}
+impl ReplacementHost<'_> {
+    fn get(&self) -> &dyn Filesystem {
+        match self {
+            Self::Owned(fs) => fs.as_ref(),
+            Self::Borrowed(fs) => *fs,
         }
     }
-    Err(last)
 }
 
 /// New contents of a [`FileStorage`] record, in a temporary sibling file.
-struct FileReplacement {
+struct FileReplacement<'a> {
     inner: Rc<RefCell<Inner>>,
     number: u64,
     /// The temporary file's path until the commit renames it.
     temporary: Option<PathBuf>,
-    file: Option<File>,
+    file: Option<Box<dyn FileIo>>,
+    host: ReplacementHost<'a>,
+    creation: bool,
+    broken: bool,
     len: u64,
 }
 
-impl FileReplacement {
-    fn file(&self) -> io::Result<&File> {
+impl FileReplacement<'_> {
+    fn file(&mut self) -> io::Result<&mut (dyn FileIo + 'static)> {
         self.file
-            .as_ref()
+            .as_deref_mut()
             .ok_or_else(|| io::Error::other("the replacement is closed"))
     }
 
@@ -651,7 +715,7 @@ impl FileReplacement {
     }
 }
 
-impl Replacement for FileReplacement {
+impl Replacement for FileReplacement<'_> {
     fn size(&self) -> Result<u64, Error> {
         Ok(self.len)
     }
@@ -664,18 +728,25 @@ impl Replacement for FileReplacement {
             return Ok(());
         }
         self.file()
-            .and_then(|file| read_exact_at(file, offset, buf))
+            .and_then(|file| {
+                file.seek(SeekFrom::Start(offset))?;
+                file.read_exact(buf)
+            })
             .map_err(|error| host("cannot read the replacement", &error))
     }
 
     fn append(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        if self.broken {
+            return Err(usage("the replacement must be dropped"));
+        }
         if bytes.is_empty() {
             return Ok(());
         }
+        let len = self.len;
         let fail = self.check(Step::ReplacementWrite);
         match self
             .file()
-            .and_then(|file| write_at(file, self.len, bytes, fail))
+            .and_then(|file| write_at(file, len, bytes, fail))
         {
             Ok(()) => {
                 self.len += bytes.len() as u64;
@@ -685,12 +756,13 @@ impl Replacement for FileReplacement {
                 let restored = self
                     .check(Step::Restore)
                     .and_then(|()| self.file())
-                    .and_then(|file| file.set_len(self.len));
+                    .and_then(|file| file.set_len(len));
                 match restored {
                     Ok(()) => Err(host("cannot append to the replacement", &error)),
                     Err(_) => {
                         // Same as the in-memory storage of the contract's
                         // tests: the record waits to be opened again.
+                        self.broken = true;
                         let mut inner = self.inner.borrow_mut();
                         if !inner.released && inner.replacement == Some(self.number) {
                             inner.poisoned = true;
@@ -711,48 +783,141 @@ impl Replacement for FileReplacement {
             return Err(usage("the record was released"));
         }
         inner.check_writable()?;
+        if self.broken {
+            return Err(usage("the replacement must be dropped"));
+        }
         inner.replacement = None;
-        let (Some(temporary), Some(file)) = (self.temporary.take(), self.file.take()) else {
+        let (Some(temporary), Some(mut file)) = (self.temporary.take(), self.file.take()) else {
             return Err(usage("the replacement is closed"));
         };
-        let synced = inner
-            .faults
-            .check(&inner.name, Step::ReplacementSync)
-            .and_then(|()| file.sync_all());
-        // Windows renames a closed file reliably, an open one not always.
-        drop(file);
-        if let Err(error) = synced {
-            let _ = fs::remove_file(&temporary);
-            return Err(host("cannot make the new contents durable", &error));
-        }
-        inner.data = None;
-        let renamed = inner
-            .faults
-            .check(&inner.name, Step::Rename)
-            .and_then(|()| fs::rename(&temporary, &inner.path));
-        if let Err(error) = renamed {
-            let _ = fs::remove_file(&temporary);
-            return Err(host("cannot put the new contents in place", &error));
-        }
-        inner.exists = true;
-        inner.len = self.len;
-        inner.directory_unsynced = false;
-        let durable = inner
-            .faults
-            .check(&inner.name, Step::SyncDirectory)
-            .and_then(|()| sync_rename(&inner.dir, &inner.path));
-        if let Err(error) = durable {
-            inner.poisoned = true;
-            return Err(uncertain(
-                "the new contents are in place but may not survive a power cut",
-                &error,
-            ));
-        }
-        Ok(())
+        let fs = self.host.get();
+        let result = (|| {
+            if self.creation {
+                let initial = inner.initial.as_deref().unwrap_or_default();
+                if self.len != initial.len() as u64 {
+                    return Err(usage("initial bytes differ"));
+                }
+                let mut bytes = vec![0; initial.len()];
+                file.seek(SeekFrom::Start(0))
+                    .and_then(|_| file.read_exact(&mut bytes))
+                    .map_err(|e| host("initial read", &e))?;
+                if bytes != initial {
+                    return Err(usage("initial bytes differ"));
+                }
+            } else if inner.initial.is_some() && inner.exists {
+                // Apply permissions after writes too: Unix may clear set-id bits
+                // when writing a file even after an earlier chmod.
+                let permissions = inner
+                    .data()
+                    .and_then(|file| file.metadata())
+                    .map_err(|e| host("replacement metadata", &e))?
+                    .permissions();
+                file.set_permissions(permissions.clone())
+                    .map_err(|e| host("replacement permissions", &e))?;
+                let actual = file
+                    .metadata()
+                    .map_err(|e| host("replacement metadata", &e))?
+                    .permissions();
+                if actual != permissions {
+                    return Err(host(
+                        "replacement permissions",
+                        &io::Error::other("host did not preserve exact permissions"),
+                    ));
+                }
+            }
+            inner
+                .faults
+                .check(&inner.name, Step::ReplacementSync)
+                .and_then(|()| file.flush())
+                .and_then(|()| file.sync_all())
+                .map_err(|e| {
+                    host(
+                        if self.creation {
+                            "initial sync"
+                        } else {
+                            "replacement sync"
+                        },
+                        &e,
+                    )
+                })?;
+            drop(file);
+            inner.data = None;
+            if self.creation {
+                if let Err(error) = fs.hard_link(&temporary, &inner.path) {
+                    if error.kind() == io::ErrorKind::AlreadyExists {
+                        return Err(host("publish initial", &error));
+                    }
+                    // A failed host call can still have published the link.
+                    // Only observed absence proves that nothing is in place.
+                    match fs.symlink_metadata(&inner.path) {
+                        Err(missing) if missing.kind() == io::ErrorKind::NotFound => {
+                            return Err(host("publish initial", &error));
+                        }
+                        Ok(metadata) => {
+                            inner.exists = true;
+                            inner.len = metadata.len();
+                        }
+                        Err(_) => {
+                            inner.exists = true;
+                            inner.len_unknown = true;
+                        }
+                    }
+                    inner.poisoned = true;
+                    return Err(uncertain("publish initial", &error));
+                }
+            } else {
+                inner
+                    .faults
+                    .check(&inner.name, Step::Rename)
+                    .map_err(|e| host("replacement rename", &e))?;
+                if let Err(error) = fs.rename(&temporary, &inner.path) {
+                    inner.poisoned = true;
+                    inner.len_unknown = true;
+                    if let Ok(data) = fs.open(&inner.path, true) {
+                        if let Ok(metadata) = data.metadata() {
+                            inner.len = metadata.len();
+                            inner.len_unknown = false;
+                        }
+                        inner.data = Some(data);
+                    }
+                    return Err(uncertain("replacement rename", &error));
+                }
+            }
+            inner.exists = true;
+            inner.len = self.len;
+            inner.directory_unsynced = true;
+            let settle = (|| {
+                if self.creation {
+                    fs.remove_file(&temporary)
+                        .map_err(|e| ("unlink initial", e))?;
+                    path::verify(fs, &inner.path).map_err(|e| ("verify path", e))?;
+                    path::cleanup(
+                        fs,
+                        &inner.path,
+                        inner.initial.as_deref().unwrap_or_default(),
+                        inner.protected.as_ref(),
+                    )
+                    .map_err(|e| ("cleanup", e))?;
+                }
+                inner
+                    .faults
+                    .check(&inner.name, Step::SyncDirectory)
+                    .and_then(|()| fs.sync_directory(&inner.path))
+                    .map_err(|e| ("directory sync", e))
+            })();
+            if let Err((step, error)) = settle {
+                inner.poisoned = true;
+                return Err(uncertain(step, &error));
+            }
+            inner.directory_unsynced = false;
+            Ok(())
+        })();
+        let _ = fs.remove_file(&temporary);
+        result
     }
 }
 
-impl Drop for FileReplacement {
+impl Drop for FileReplacement<'_> {
     fn drop(&mut self) {
         self.file = None;
         let Ok(mut inner) = self.inner.try_borrow_mut() else {
@@ -766,8 +931,229 @@ impl Drop for FileReplacement {
         // next opening removes the leftover instead.
         if !inner.released {
             if let Some(temporary) = self.temporary.take() {
-                let _ = fs::remove_file(temporary);
+                let _ = self.host.get().remove_file(&temporary);
             }
         }
+    }
+}
+
+impl FileRecord {
+    /// Open a path for writing with the host filesystem. `initial` is the
+    /// exact first publication, not a format validator for existing bytes.
+    /// `protected` identifies a read-only input which must not be opened for
+    /// writing or removed through a temporary-name alias. No parent directory
+    /// is created. Empty existing files remain valid generic records.
+    pub fn open(
+        path: impl AsRef<Path>,
+        initial: &[u8],
+        protected: Option<&Metadata>,
+    ) -> Result<Self, FileError> {
+        Self::open_with(
+            Rc::new(HostFilesystem),
+            path.as_ref(),
+            None,
+            initial,
+            protected,
+        )
+    }
+
+    /// Open for shared read-only inspection, with the absent-sidecar fallback
+    /// specified by PathLock::inspection. Missing files fail with Storage.
+    pub fn inspect(path: impl AsRef<Path>) -> Result<Self, FileError> {
+        let fs = Rc::new(HostFilesystem);
+        let lock = PathLock::acquire(fs.as_ref(), path.as_ref(), true)?;
+        Self::open_with(fs, path.as_ref(), Some(lock), &[], None)
+    }
+
+    /// Open through a retained injectable filesystem and an optional lock
+    /// already acquired by the caller. A supplied token must name the same
+    /// canonical path; a shared token selects inspection. No token means an
+    /// exclusive lock is taken. A no-lock inspection token never grants writes.
+    /// The record owns the token until drop, even while replacements live.
+    pub fn open_with(
+        fs: Rc<dyn Filesystem>,
+        path: &Path,
+        lock: Option<PathLock>,
+        initial: &[u8],
+        protected: Option<&Metadata>,
+    ) -> Result<Self, FileError> {
+        let resolved = path::resolve(fs.as_ref(), path).map_err(|e| stage("resolve path", e))?;
+        let lock = match lock {
+            Some(lock) if lock.path == resolved => lock,
+            Some(_) => {
+                return Err(stage(
+                    "lock",
+                    io::Error::new(io::ErrorKind::InvalidInput, "lock names another path"),
+                ))
+            }
+            None => PathLock::acquire(fs.as_ref(), &resolved, false)?,
+        };
+        let read_only = lock.shared;
+        let data = match fs.open(&resolved, !read_only) {
+            Ok(data) => Some(data),
+            Err(error) if !read_only && error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(stage("open", error)),
+        };
+        let metadata = data
+            .as_ref()
+            .map(|file| file.metadata())
+            .transpose()
+            .map_err(|e| stage("metadata", e))?;
+        if !read_only {
+            if let Some(_protected) = protected {
+                #[cfg(not(unix))]
+                return Err(stage(
+                    "metadata",
+                    io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        "protected identity is unavailable on this host",
+                    ),
+                ));
+                #[cfg(unix)]
+                if metadata
+                    .as_ref()
+                    .is_some_and(|meta| same_file(meta, _protected))
+                {
+                    return Err(stage(
+                        "metadata",
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "record aliases the protected file",
+                        ),
+                    ));
+                }
+            }
+        }
+        if data.is_some() {
+            path::verify(fs.as_ref(), &resolved).map_err(|e| stage("verify path", e))?;
+            if !read_only {
+                path::cleanup(fs.as_ref(), &resolved, initial, protected)
+                    .map_err(|e| stage("cleanup", e))?;
+                fs.sync_directory(&resolved)
+                    .map_err(|e| stage("directory sync", e))?;
+            }
+        }
+        Ok(Self {
+            inner: Rc::new(RefCell::new(Inner {
+                name: String::new(),
+                dir: crate::host::parent(&resolved).to_owned(),
+                file: String::new(),
+                path: resolved,
+                exists: data.is_some(),
+                len: metadata.map_or(0, |meta| meta.len()),
+                len_unknown: false,
+                data,
+                host: fs,
+                initial: Some(initial.to_vec()),
+                protected: protected.cloned(),
+                read_only,
+                directory_unsynced: false,
+                poisoned: false,
+                released: false,
+                replacement: None,
+                replacements: 0,
+                lock: Some(Box::new(lock)),
+                faults: Faults::default(),
+            })),
+        })
+    }
+
+    /// Whether a publication exists. A missing path remains absent until its
+    /// first replacement commits; an uncertain publication may already exist.
+    pub fn exists(&self) -> bool {
+        self.inner.borrow().exists
+    }
+
+    /// Start a replacement using a borrowed host seam, including temporary
+    /// creation, writes through FileIo, permissions, barriers, rename/link and
+    /// directory sync. This supports offline tools whose injected operations
+    /// live for one retention only. The replacement cannot outlive `fs`.
+    pub fn replace_with<'a>(
+        &mut self,
+        fs: &'a dyn Filesystem,
+    ) -> Result<Box<dyn Replacement + 'a>, Error> {
+        self.start_replacement(Some(fs))
+    }
+
+    fn start_replacement<'a>(
+        &mut self,
+        fs: Option<&'a dyn Filesystem>,
+    ) -> Result<Box<dyn Replacement + 'a>, Error> {
+        let mut inner = self.inner.borrow_mut();
+        inner.check_writable()?;
+        if inner.replacement.is_some() {
+            return Err(usage("the record already has a replacement"));
+        }
+        let host = match fs {
+            Some(fs) => ReplacementHost::Borrowed(fs),
+            None => ReplacementHost::Owned(Rc::clone(&inner.host)),
+        };
+        let creation = inner.initial.is_some() && !inner.exists;
+        let permissions = if inner.initial.is_some() && inner.exists {
+            Some(
+                inner
+                    .data()
+                    .and_then(|file| file.metadata())
+                    .map_err(|e| crate::storage::host("replacement metadata", &e))?
+                    .permissions(),
+            )
+        } else {
+            None
+        };
+        let mut chosen = None;
+        for number in 0..if inner.initial.is_some() {
+            u64::MAX
+        } else {
+            64
+        } {
+            let temporary = if inner.initial.is_some() {
+                path::suffix(
+                    &inner.path,
+                    &format!(
+                        ".{}-{number}.tmp",
+                        if creation { "create" } else { "retain" }
+                    ),
+                )
+            } else {
+                inner.dir.join(format!("{}_{number}.tmp", inner.file))
+            };
+            match host.get().create_new(&temporary, permissions.as_ref()) {
+                Ok(mut file) => {
+                    if let Some(permissions) = permissions.clone() {
+                        if let Err(error) = file.set_permissions(permissions) {
+                            drop(file);
+                            let _ = host.get().remove_file(&temporary);
+                            return Err(crate::storage::host("replacement permissions", &error));
+                        }
+                    }
+                    chosen = Some((temporary, file));
+                    break;
+                }
+                Err(error)
+                    if error.kind() == io::ErrorKind::AlreadyExists
+                        || (inner.initial.is_none()
+                            && error.kind() == io::ErrorKind::PermissionDenied) => {}
+                Err(error) => return Err(crate::storage::host("create temporary", &error)),
+            }
+        }
+        let (temporary, file) = chosen.ok_or_else(|| {
+            crate::storage::host(
+                "create temporary",
+                &io::Error::other("no free temporary name"),
+            )
+        })?;
+        inner.replacements += 1;
+        let number = inner.replacements;
+        inner.replacement = Some(number);
+        Ok(Box::new(FileReplacement {
+            inner: Rc::clone(&self.inner),
+            number,
+            temporary: Some(temporary),
+            file: Some(file),
+            host,
+            creation,
+            broken: false,
+            len: 0,
+        }))
     }
 }

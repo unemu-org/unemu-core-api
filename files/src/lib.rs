@@ -10,6 +10,10 @@
 //! - [`FileStorage`]: a directory of records, one file per record, held
 //!   exclusively through a file lock, synchronised and replaced in one
 //!   atomic step.
+//! - [`FileRecord`]: a record at an arbitrary path, with a stable sidecar
+//!   lock, no-clobber initial publication and protected-file cleanup.
+//! - [`PathLock`]: exclusive use or shared read-only inspection, also for
+//!   offline tools; [`Filesystem`] and [`FileIo`] inject host operations.
 //! - [`FileContent`]: verified content read from a host file.
 //! - [`file_name`] and [`record_name`]: how a record name becomes a file
 //!   name, the same on every host.
@@ -26,12 +30,16 @@
 #![forbid(unsafe_code)]
 
 mod content;
+mod host;
 mod names;
+mod path;
 mod storage;
 
 pub use crate::content::FileContent;
+pub use crate::host::{FileIo, Filesystem, HostFilesystem};
 pub use crate::names::{file_name, record_name};
-pub use crate::storage::FileStorage;
+pub use crate::path::{is_temporary_path, FileError, PathLock};
+pub use crate::storage::{FileRecord, FileStorage};
 
 #[cfg(test)]
 mod tests;

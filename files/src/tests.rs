@@ -67,10 +67,10 @@ fn read_all(record: &mut dyn Record) -> Vec<u8> {
     bytes
 }
 
-fn kind<T>(result: Result<T, unemu_core_api::Error>) -> ErrorKind {
+fn kind<T, E: Into<unemu_core_api::Error>>(result: Result<T, E>) -> ErrorKind {
     match result {
         Ok(_) => panic!("expected a failure"),
-        Err(error) => error.kind,
+        Err(error) => error.into().kind,
     }
 }
 
@@ -209,6 +209,8 @@ fn lock_holder_child() {
     };
     let storage = FileStorage::open(PathBuf::from(dir)).expect("storage");
     let _record = storage.open("shared").expect("open in the child");
+    let _path_record = crate::FileRecord::open(storage.dir().join("path-record"), b"header", None)
+        .expect("open path record in the child");
     let mut out = std::io::stdout();
     writeln!(out, "holding").expect("report");
     out.flush().expect("flush");
@@ -246,6 +248,18 @@ fn a_record_held_by_another_process_does_not_open() {
     let (mut child, lines) = spawn_lock_holder(&dir);
     let storage = FileStorage::open(dir.path()).expect("storage");
     assert_eq!(kind(storage.open("shared")), ErrorKind::Usage);
+    assert_eq!(
+        kind(crate::FileRecord::open(
+            dir.path().join("path-record"),
+            b"header",
+            None
+        )),
+        ErrorKind::Usage
+    );
+    assert_eq!(
+        kind(crate::FileRecord::inspect(dir.path().join("path-record"))),
+        ErrorKind::Usage
+    );
     storage.open("other").expect("another record opens");
 
     drop(child.stdin.take());
@@ -254,6 +268,8 @@ fn a_record_held_by_another_process_does_not_open() {
     lines.for_each(drop);
     assert!(child.wait().expect("the child ends").success());
     storage.open("shared").expect("open after the child ended");
+    crate::FileRecord::open(dir.path().join("path-record"), b"header", None)
+        .expect("open path record after the child ended");
 }
 
 #[test]
@@ -695,4 +711,1032 @@ fn content_whose_modification_time_changed_fails_with_content() {
     file.set_modified(modified + Duration::from_secs(10))
         .expect("set the time");
     assert_eq!(kind(content.read_at(0, &mut buf)), ErrorKind::Content);
+}
+
+// The public seam wraps actual files, so planted partial writes, changed
+// identities and post-rename failures exercise the production state machine.
+#[derive(Default)]
+struct HostProbe {
+    events: std::cell::RefCell<Vec<String>>,
+    failures: std::cell::RefCell<Vec<String>>,
+}
+impl HostProbe {
+    fn fail(&self, step: &str) {
+        self.failures.borrow_mut().push(step.into());
+    }
+    fn step(&self, step: &str) -> std::io::Result<()> {
+        self.events.borrow_mut().push(step.into());
+        let mut failures = self.failures.borrow_mut();
+        if let Some(i) = failures.iter().position(|s| s == step) {
+            failures.remove(i);
+            Err(std::io::Error::other(format!("planted {step}")))
+        } else {
+            Ok(())
+        }
+    }
+}
+struct ProbedFile {
+    file: Box<dyn crate::FileIo>,
+    probe: Rc<HostProbe>,
+    role: &'static str,
+}
+impl ProbedFile {
+    fn step(&self, op: &str) -> std::io::Result<()> {
+        self.probe.step(&format!("{} {op}", self.role))
+    }
+}
+impl std::io::Read for ProbedFile {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        self.step("read")?;
+        self.file.read(bytes)
+    }
+}
+impl Write for ProbedFile {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if let Err(error) = self.step("write") {
+            self.file.write_all(&bytes[..bytes.len() / 2])?;
+            return Err(error);
+        }
+        self.file.write(bytes)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.step("flush")?;
+        self.file.flush()
+    }
+}
+impl std::io::Seek for ProbedFile {
+    fn seek(&mut self, from: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.step("seek")?;
+        self.file.seek(from)
+    }
+}
+impl crate::FileIo for ProbedFile {
+    fn metadata(&self) -> std::io::Result<fs::Metadata> {
+        self.step("metadata")?;
+        self.file.metadata()
+    }
+    fn set_len(&mut self, len: u64) -> std::io::Result<()> {
+        self.step("cut")?;
+        self.file.set_len(len)?;
+        self.step("cut after")
+    }
+    fn sync_all(&mut self) -> std::io::Result<()> {
+        self.step("sync")?;
+        self.file.sync_all()
+    }
+    fn set_permissions(&mut self, p: fs::Permissions) -> std::io::Result<()> {
+        self.step("permissions")?;
+        self.file.set_permissions(p)
+    }
+}
+#[derive(Clone, Default)]
+struct ProbedFs(Rc<HostProbe>);
+impl ProbedFs {
+    fn wrap(&self, file: Box<dyn crate::FileIo>, path: &Path) -> Box<dyn crate::FileIo> {
+        let name = path.to_string_lossy();
+        let role = if name.contains(".create-") {
+            "initial"
+        } else if name.contains(".retain-") {
+            "retention"
+        } else {
+            "record"
+        };
+        Box::new(ProbedFile {
+            file,
+            probe: self.0.clone(),
+            role,
+        })
+    }
+}
+impl crate::Filesystem for ProbedFs {
+    fn canonicalize(&self, path: &Path) -> std::io::Result<PathBuf> {
+        self.0.step("canonicalize")?;
+        crate::HostFilesystem.canonicalize(path)
+    }
+    fn symlink_metadata(&self, path: &Path) -> std::io::Result<fs::Metadata> {
+        self.0.step("entry metadata")?;
+        crate::HostFilesystem.symlink_metadata(path)
+    }
+    fn entries(&self, dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+        self.0.step("entries")?;
+        crate::HostFilesystem.entries(dir)
+    }
+    fn open(&self, path: &Path, write: bool) -> std::io::Result<Box<dyn crate::FileIo>> {
+        self.0.step("open")?;
+        Ok(self.wrap(crate::HostFilesystem.open(path, write)?, path))
+    }
+    fn open_candidate(&self, path: &Path) -> std::io::Result<Box<dyn crate::FileIo>> {
+        self.0.step("candidate open")?;
+        crate::HostFilesystem.open_candidate(path)
+    }
+    fn create_new(
+        &self,
+        path: &Path,
+        p: Option<&fs::Permissions>,
+    ) -> std::io::Result<Box<dyn crate::FileIo>> {
+        self.0.step("create temporary")?;
+        Ok(self.wrap(crate::HostFilesystem.create_new(path, p)?, path))
+    }
+    fn hard_link(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+        self.0.step("link")?;
+        crate::HostFilesystem.hard_link(from, to)?;
+        self.0.step("link after")
+    }
+    fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+        self.0.step("rename")?;
+        crate::HostFilesystem.rename(from, to)?;
+        self.0.step("rename after")
+    }
+    fn remove_file(&self, path: &Path) -> std::io::Result<()> {
+        self.0.step("remove")?;
+        crate::HostFilesystem.remove_file(path)
+    }
+    fn sync_directory(&self, path: &Path) -> std::io::Result<()> {
+        self.0.step("directory sync")?;
+        crate::HostFilesystem.sync_directory(path)
+    }
+    fn lock(&self, path: &Path, shared: bool) -> std::io::Result<Box<dyn std::any::Any>> {
+        self.0.step("lock")?;
+        crate::HostFilesystem.lock(path, shared)
+    }
+}
+
+fn path_record(fs: &ProbedFs, path: &Path) -> crate::FileRecord {
+    crate::FileRecord::open_with(Rc::new(fs.clone()), path, None, b"header", None)
+        .expect("open path record")
+}
+fn publish(record: &mut crate::FileRecord, bytes: &[u8]) -> Result<(), unemu_core_api::Error> {
+    let mut replacement = record.replace()?;
+    replacement.append(bytes)?;
+    replacement.commit()
+}
+
+#[test]
+fn path_records_publish_only_the_expected_initial_bytes_and_keep_the_stable_lock() {
+    let dir = TempDir::new();
+    let path = dir.path().join("arbitrary FILE.bin");
+    let mut record = crate::FileRecord::open(&path, b"header", None).expect("open");
+    assert!(!record.exists());
+    assert_eq!(read_all(&mut record), b"");
+    assert_eq!(kind(record.append(b"x")), ErrorKind::Usage);
+    assert_eq!(kind(record.append(&[])), ErrorKind::Usage);
+    assert_eq!(kind(publish(&mut record, b"wrong")), ErrorKind::Usage);
+    assert_eq!(kind(publish(&mut record, b"xxxxxx")), ErrorKind::Usage);
+    assert!(!path.exists());
+    publish(&mut record, b"header").expect("initial publication");
+    assert!(record.exists());
+    record.append(b"data").expect("append");
+    record.truncate(8).expect("cut");
+    record.sync().expect("sync");
+    assert_eq!(read_all(&mut record), b"headerda");
+    assert_eq!(
+        kind(crate::FileRecord::open(&path, b"header", None)),
+        ErrorKind::Usage
+    );
+    assert!(dir.path().join("arbitrary FILE.bin.lock").is_file());
+    drop(record);
+    let mut record = crate::FileRecord::open(&path, b"different", None)
+        .expect("generic open does not interpret existing bytes");
+    assert_eq!(read_all(&mut record), b"headerda");
+}
+
+#[test]
+fn path_initial_publication_never_clobbers_a_competing_entry() {
+    let dir = TempDir::new();
+    let path = dir.path().join("record");
+    let mut record = crate::FileRecord::open(&path, b"header", None).expect("open");
+    fs::write(&path, b"other writer").expect("competing file");
+    assert_eq!(kind(publish(&mut record, b"header")), ErrorKind::Storage);
+    assert_eq!(fs::read(path).unwrap(), b"other writer");
+    assert!(!dir.files().iter().any(|name| name.contains(".create-")));
+}
+
+#[test]
+fn path_protocol_orders_file_barriers_publication_cleanup_and_directory_barrier() {
+    let dir = TempDir::new();
+    let path = dir.path().join("record");
+    let fs = ProbedFs::default();
+    let mut record = path_record(&fs, &path);
+    fs.0.events.borrow_mut().clear();
+    publish(&mut record, b"header").expect("publish");
+    let events = fs.0.events.borrow();
+    let positions: Vec<_> = [
+        "initial write",
+        "initial flush",
+        "initial sync",
+        "link",
+        "remove",
+        "canonicalize",
+        "entries",
+        "directory sync",
+    ]
+    .iter()
+    .map(|event| events.iter().position(|e| e == event).expect(event))
+    .collect();
+    assert!(positions.windows(2).all(|p| p[0] < p[1]), "{events:?}");
+    drop(events);
+    fs.0.events.borrow_mut().clear();
+    publish(&mut record, b"replacement").expect("retain");
+    let events = fs.0.events.borrow();
+    let positions: Vec<_> = [
+        "retention write",
+        "retention flush",
+        "retention sync",
+        "rename",
+        "directory sync",
+    ]
+    .iter()
+    .map(|event| events.iter().position(|e| e == event).expect(event))
+    .collect();
+    assert!(positions.windows(2).all(|p| p[0] < p[1]), "{events:?}");
+}
+
+#[test]
+fn path_creation_failures_preserve_absence_or_poison_after_publication() {
+    for (step, stage, uncertain) in [
+        ("create temporary", "create temporary", false),
+        ("initial write", "append", false),
+        ("initial flush", "initial sync", false),
+        ("initial sync", "initial sync", false),
+        ("link", "publish initial", false),
+        ("link after", "publish initial", true),
+        ("remove", "unlink initial", true),
+        ("canonicalize", "verify path", true),
+        ("entries", "cleanup", true),
+        ("directory sync", "directory sync", true),
+    ] {
+        let dir = TempDir::new();
+        let path = dir.path().join("record");
+        let fs = ProbedFs::default();
+        let mut record = path_record(&fs, &path);
+        fs.0.fail(step);
+        let error = publish(&mut record, b"header").expect_err(step);
+        assert_eq!(
+            error.kind,
+            if uncertain {
+                ErrorKind::StorageUncertain
+            } else {
+                ErrorKind::Storage
+            },
+            "{step}: {error}"
+        );
+        assert!(error.message.contains(stage), "{step}: {error}");
+        assert_eq!(path.exists(), uncertain, "{step}");
+        if uncertain {
+            assert_eq!(read_all(&mut record), b"header", "{step}");
+            assert_eq!(kind(record.sync()), ErrorKind::Usage);
+            assert_eq!(kind(record.append(&[])), ErrorKind::Usage);
+        } else {
+            publish(&mut record, b"header").expect("retry known failure");
+        }
+    }
+}
+
+#[test]
+fn path_open_failures_preserve_the_exact_stage_and_release_the_lock() {
+    for (step, stage) in [
+        ("canonicalize", "resolve path"),
+        ("lock", "lock"),
+        ("open", "open"),
+        ("record metadata", "metadata"),
+        ("entries", "cleanup"),
+        ("directory sync", "directory sync"),
+    ] {
+        let dir = TempDir::new();
+        let path = dir.path().join("record");
+        fs::write(&path, b"header").unwrap();
+        let fs = ProbedFs::default();
+        fs.0.fail(step);
+        let error = crate::FileRecord::open_with(Rc::new(fs), &path, None, b"header", None)
+            .err()
+            .expect(step);
+        assert_eq!(error.stage, stage);
+        assert!(error.source.to_string().contains(step));
+        crate::FileRecord::open(&path, b"header", None).expect("lock released on error");
+    }
+}
+
+#[test]
+fn path_record_seam_covers_partial_writes_cuts_and_barriers() {
+    for (step, after, expected) in [
+        ("record write", false, ErrorKind::Storage),
+        ("record write", true, ErrorKind::StorageUncertain),
+        ("record cut", false, ErrorKind::Storage),
+        ("record cut after", false, ErrorKind::StorageUncertain),
+        ("record flush", false, ErrorKind::StorageUncertain),
+        ("record sync", false, ErrorKind::StorageUncertain),
+    ] {
+        let dir = TempDir::new();
+        let path = dir.path().join("record");
+        fs::write(&path, b"header").unwrap();
+        let fs = ProbedFs::default();
+        let mut record = path_record(&fs, &path);
+        fs.0.fail(step);
+        if after {
+            fs.0.fail("record cut");
+        }
+        let result = if step.contains("write") {
+            record.append(b"new data")
+        } else if step.contains("cut") {
+            record.truncate(2)
+        } else {
+            record.sync()
+        };
+        assert_eq!(kind(result), expected, "{step}");
+        assert!(!read_all(&mut record).is_empty());
+        if expected == ErrorKind::StorageUncertain {
+            assert_eq!(kind(record.truncate(0)), ErrorKind::Usage);
+            assert_eq!(kind(record.replace()), ErrorKind::Usage);
+        } else {
+            assert_eq!(read_all(&mut record), b"header");
+        }
+    }
+}
+
+#[test]
+fn retention_can_borrow_an_independent_failure_seam() {
+    for (step, uncertain, new) in [
+        ("create temporary", false, false),
+        ("retention permissions", false, false),
+        ("retention write", false, false),
+        ("retention flush", false, false),
+        ("retention sync", false, false),
+        ("rename", true, false),
+        ("rename after", true, true),
+        ("directory sync", true, true),
+    ] {
+        let dir = TempDir::new();
+        let path = dir.path().join("record");
+        fs::write(&path, b"old").unwrap();
+        let mut record = crate::FileRecord::open(&path, b"header", None).unwrap();
+        let fs = ProbedFs::default();
+        fs.0.fail(step);
+        let result = (|| {
+            let mut replacement = record.replace_with(&fs)?;
+            replacement.append(b"new contents")?;
+            replacement.commit()
+        })();
+        let error = result.expect_err(step);
+        assert_eq!(
+            error.kind,
+            if uncertain {
+                ErrorKind::StorageUncertain
+            } else {
+                ErrorKind::Storage
+            },
+            "{step}: {error}"
+        );
+        assert_eq!(
+            read_all(&mut record),
+            if new {
+                b"new contents".as_slice()
+            } else {
+                b"old".as_slice()
+            },
+            "{step}"
+        );
+        if uncertain {
+            assert_eq!(kind(record.sync()), ErrorKind::Usage);
+        } else {
+            record.append(b"!").expect("record remains writable");
+        }
+    }
+}
+
+#[test]
+fn path_shared_inspection_excludes_writers_and_refuses_every_mutation() {
+    let dir = TempDir::new();
+    let path = dir.path().join("record");
+    fs::write(&path, b"bytes").unwrap();
+    let mut first = crate::FileRecord::inspect(&path).unwrap();
+    let second = crate::FileRecord::inspect(&path).unwrap();
+    assert_eq!(
+        kind(crate::FileRecord::open(&path, b"header", None)),
+        ErrorKind::Usage
+    );
+    assert_eq!(read_all(&mut first), b"bytes");
+    assert_eq!(kind(first.append(&[])), ErrorKind::Usage);
+    assert_eq!(kind(first.truncate(5)), ErrorKind::Usage);
+    assert_eq!(kind(first.sync()), ErrorKind::Usage);
+    assert_eq!(kind(first.replace()), ErrorKind::Usage);
+    drop(first);
+    drop(second);
+    let writer = crate::FileRecord::open(&path, b"header", None).unwrap();
+    assert_eq!(kind(crate::FileRecord::inspect(&path)), ErrorKind::Usage);
+    drop(writer);
+    assert!(dir.path().join("record.lock").exists());
+}
+
+struct ReadOnlyLockFs;
+impl crate::Filesystem for ReadOnlyLockFs {
+    fn lock(&self, _: &Path, _: bool) -> std::io::Result<Box<dyn std::any::Any>> {
+        Err(std::io::ErrorKind::PermissionDenied.into())
+    }
+}
+#[test]
+fn inspection_fallback_requires_an_absent_sidecar_and_never_grants_writes() {
+    let dir = TempDir::new();
+    let path = dir.path().join("record");
+    fs::write(&path, b"header").unwrap();
+    let lock =
+        crate::PathLock::acquire(&ReadOnlyLockFs, &path, true).expect("read-only folder fallback");
+    assert!(!lock.is_locked());
+    let mut record =
+        crate::FileRecord::open_with(Rc::new(ReadOnlyLockFs), &path, Some(lock), &[], None)
+            .unwrap();
+    assert_eq!(read_all(&mut record), b"header");
+    assert_eq!(kind(record.append(b"x")), ErrorKind::Usage);
+    assert_eq!(
+        kind(
+            crate::PathLock::acquire(&ReadOnlyLockFs, &path, false)
+                .map_err(unemu_core_api::Error::from)
+        ),
+        ErrorKind::Storage
+    );
+    fs::write(dir.path().join("record.lock"), b"").unwrap();
+    assert_eq!(
+        crate::PathLock::acquire(&ReadOnlyLockFs, &path, true)
+            .err()
+            .unwrap()
+            .stage,
+        "lock"
+    );
+}
+
+#[test]
+fn a_preacquired_path_lock_transfers_to_the_record() {
+    let dir = TempDir::new();
+    let path = dir.path().join("record");
+    let lock = crate::PathLock::exclusive(&path).unwrap();
+    let mut record = crate::FileRecord::open_with(
+        Rc::new(crate::HostFilesystem),
+        &path,
+        Some(lock),
+        b"header",
+        None,
+    )
+    .unwrap();
+    publish(&mut record, b"header").unwrap();
+    let lock = crate::PathLock::exclusive(dir.path().join("another")).unwrap();
+    assert_eq!(
+        crate::FileRecord::open_with(
+            Rc::new(crate::HostFilesystem),
+            &path,
+            Some(lock),
+            b"header",
+            None
+        )
+        .err()
+        .unwrap()
+        .stage,
+        "lock"
+    );
+    assert_eq!(
+        kind(crate::FileRecord::open(&path, b"header", None)),
+        ErrorKind::Usage
+    );
+    drop(record);
+    crate::PathLock::exclusive(path).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn path_cleanup_preserves_protected_aliases_links_special_files_and_foreign_prefixes() {
+    use std::os::unix::fs::symlink;
+    let dir = TempDir::new();
+    let path = dir.path().join("record");
+    fs::write(&path, b"headerdata").unwrap();
+    fs::write(dir.path().join("base"), b"he").unwrap();
+    let protected = fs::metadata(dir.path().join("base")).unwrap();
+    for name in ["record.create-0.tmp", "record.retain-0.tmp"] {
+        fs::hard_link(dir.path().join("base"), dir.path().join(name)).unwrap();
+    }
+    fs::write(dir.path().join("record.create-1.tmp"), b"head").unwrap();
+    fs::write(dir.path().join("record.create-2.tmp"), b"foreign").unwrap();
+    fs::write(dir.path().join("record.create-3.tmp"), b"header too long").unwrap();
+    fs::write(dir.path().join("record.retain-1.tmp"), b"any partial bytes").unwrap();
+    symlink(
+        dir.path().join("base"),
+        dir.path().join("record.retain-2.tmp"),
+    )
+    .unwrap();
+    fs::create_dir(dir.path().join("record.retain-3.tmp")).unwrap();
+    fs::write(dir.path().join("record.retain-x.tmp"), b"other namespace").unwrap();
+    let record = crate::FileRecord::open(&path, b"header", Some(&protected)).unwrap();
+    for name in [
+        "record.create-0.tmp",
+        "record.retain-0.tmp",
+        "record.create-2.tmp",
+        "record.create-3.tmp",
+        "record.retain-2.tmp",
+        "record.retain-3.tmp",
+        "record.retain-x.tmp",
+    ] {
+        assert!(
+            fs::symlink_metadata(dir.path().join(name)).is_ok(),
+            "{name}"
+        );
+    }
+    assert!(!dir.path().join("record.create-1.tmp").exists());
+    assert!(!dir.path().join("record.retain-1.tmp").exists());
+    assert_eq!(fs::read(dir.path().join("base")).unwrap(), b"he");
+    drop(record);
+    assert_eq!(
+        crate::FileRecord::open(dir.path().join("base"), b"header", Some(&protected))
+            .err()
+            .unwrap()
+            .stage,
+        "metadata"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn retention_preserves_exact_unix_mode_and_the_lock_inode() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let dir = TempDir::new();
+    let path = dir.path().join("record");
+    fs::write(&path, b"old").unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o6777)).unwrap();
+    let expected_mode = fs::metadata(&path).unwrap().mode() & 0o7777;
+    let mut record = crate::FileRecord::open(&path, b"header", None).unwrap();
+    let lock_path = dir.path().join("record.lock");
+    let before = fs::metadata(&lock_path).unwrap();
+    let mut replacement = record.replace().unwrap();
+    assert!(dir.path().join("record.retain-0.tmp").exists());
+    replacement.append(b"new").unwrap();
+    replacement.commit().unwrap();
+    assert_eq!(fs::metadata(&path).unwrap().mode() & 0o7777, expected_mode);
+    assert_eq!(fs::metadata(lock_path).unwrap().ino(), before.ino());
+}
+
+#[cfg(unix)]
+#[test]
+fn path_resolution_rejects_reserved_and_dangling_links_and_unifies_parent_aliases() {
+    use std::os::unix::fs::symlink;
+    let dir = TempDir::new();
+    let path = dir.path().join("record");
+    symlink(&path, dir.path().join("dangling")).unwrap();
+    assert_eq!(
+        crate::FileRecord::open(dir.path().join("dangling"), b"", None)
+            .err()
+            .unwrap()
+            .stage,
+        "resolve path"
+    );
+    for name in ["record.create-0.tmp", "record.retain-9.tmp"] {
+        assert_eq!(
+            crate::FileRecord::open(dir.path().join(name), b"", None)
+                .err()
+                .unwrap()
+                .stage,
+            "resolve path"
+        );
+    }
+    symlink(dir.path(), dir.path().join("alias")).unwrap();
+    let record = crate::FileRecord::open(&path, b"header", None).unwrap();
+    assert_eq!(
+        kind(crate::FileRecord::open(
+            dir.path().join("alias/record"),
+            b"header",
+            None
+        )),
+        ErrorKind::Usage
+    );
+    drop(record);
+}
+
+#[test]
+fn a_released_path_replacement_cannot_commit_or_remove_the_next_holders_temporary() {
+    let dir = TempDir::new();
+    let path = dir.path().join("record");
+    fs::write(&path, b"old").unwrap();
+    let mut record = crate::FileRecord::open(&path, b"header", None).unwrap();
+    let mut old = record.replace().unwrap();
+    old.append(b"old replacement").unwrap();
+    drop(record);
+    let mut record = crate::FileRecord::open(&path, b"header", None).unwrap();
+    let mut next = record.replace().unwrap();
+    next.append(b"new replacement").unwrap();
+    assert_eq!(kind(old.commit()), ErrorKind::Usage);
+    next.commit().unwrap();
+    assert_eq!(read_all(&mut record), b"new replacement");
+}
+
+#[cfg(unix)]
+struct SwappingCandidateFs {
+    replacement: PathBuf,
+    after_open: bool,
+}
+#[cfg(unix)]
+impl crate::Filesystem for SwappingCandidateFs {
+    fn open_candidate(&self, path: &Path) -> std::io::Result<Box<dyn crate::FileIo>> {
+        if self.after_open {
+            let file = crate::HostFilesystem.open_candidate(path)?;
+            fs::rename(&self.replacement, path)?;
+            Ok(file)
+        } else {
+            fs::rename(&self.replacement, path)?;
+            crate::HostFilesystem.open_candidate(path)
+        }
+    }
+}
+#[cfg(unix)]
+#[test]
+fn cleanup_checks_both_the_opened_inode_and_the_entry_before_unlink() {
+    for after_open in [false, true] {
+        let dir = TempDir::new();
+        let path = dir.path().join("record");
+        let candidate = dir.path().join("record.retain-0.tmp");
+        let replacement = dir.path().join("different-inode");
+        fs::write(&path, b"header").unwrap();
+        fs::write(&candidate, b"leftover").unwrap();
+        fs::write(&replacement, b"preserve this file").unwrap();
+        let host = SwappingCandidateFs {
+            replacement,
+            after_open,
+        };
+        let _record =
+            crate::FileRecord::open_with(Rc::new(host), &path, None, b"header", None).unwrap();
+        assert_eq!(
+            fs::read(&candidate).unwrap(),
+            b"preserve this file",
+            "after_open={after_open}"
+        );
+    }
+}
+
+#[test]
+fn inspection_does_not_cleanup_or_request_a_write_or_directory_barrier() {
+    let dir = TempDir::new();
+    let path = dir.path().join("record");
+    let leftover = dir.path().join("record.retain-0.tmp");
+    fs::write(&path, b"header").unwrap();
+    fs::write(&leftover, b"leftover").unwrap();
+    let fs = ProbedFs::default();
+    fs.0.fail("entries");
+    fs.0.fail("directory sync");
+    let lock = crate::PathLock::acquire(&fs, &path, true).unwrap();
+    let mut record =
+        crate::FileRecord::open_with(Rc::new(fs.clone()), &path, Some(lock), b"header", None)
+            .unwrap();
+    assert_eq!(read_all(&mut record), b"header");
+    assert!(leftover.exists());
+    assert_eq!(fs.0.failures.borrow().len(), 2);
+}
+
+#[test]
+fn path_temporary_collisions_are_skipped_without_truncating_the_occupant() {
+    let dir = TempDir::new();
+    let path = dir.path().join("record");
+    let collision = dir.path().join("record.create-0.tmp");
+    fs::write(&collision, b"foreign").unwrap();
+    let mut record = crate::FileRecord::open(&path, b"header", None).unwrap();
+    let mut replacement = record.replace().unwrap();
+    assert!(dir.path().join("record.create-1.tmp").exists());
+    replacement.append(b"header").unwrap();
+    replacement.commit().unwrap();
+    assert_eq!(fs::read(&collision).unwrap(), b"foreign");
+    let collision = dir.path().join("record.retain-0.tmp");
+    fs::write(&collision, b"foreign").unwrap();
+    let mut replacement = record.replace().unwrap();
+    assert!(dir.path().join("record.retain-1.tmp").exists());
+    replacement.append(b"new").unwrap();
+    replacement.commit().unwrap();
+    assert_eq!(fs::read(collision).unwrap(), b"foreign");
+}
+
+#[cfg(unix)]
+#[test]
+fn inspection_never_bypasses_a_dangling_sidecar() {
+    let dir = TempDir::new();
+    let path = dir.path().join("record");
+    fs::write(&path, b"header").unwrap();
+    std::os::unix::fs::symlink(dir.path().join("missing"), dir.path().join("record.lock")).unwrap();
+    assert_eq!(
+        crate::PathLock::acquire(&ReadOnlyLockFs, &path, true)
+            .err()
+            .unwrap()
+            .stage,
+        "lock"
+    );
+    assert_eq!(
+        crate::FileRecord::inspect(path).err().unwrap().stage,
+        "lock"
+    );
+}
+
+#[test]
+fn public_file_handles_expose_read_seek_and_metadata_failures() {
+    let dir = TempDir::new();
+    let path = dir.path().join("record");
+    fs::write(&path, b"header").unwrap();
+    let fs = ProbedFs::default();
+    let mut record = path_record(&fs, &path);
+    for step in ["record seek", "record read"] {
+        fs.0.fail(step);
+        assert_eq!(kind(record.read_at(0, &mut [0])), ErrorKind::Storage);
+        assert_eq!(read_all(&mut record), b"header");
+    }
+    fs.0.fail("record metadata");
+    assert_eq!(kind(record.replace()), ErrorKind::Storage);
+    assert_eq!(read_all(&mut record), b"header");
+}
+
+#[cfg(unix)]
+#[test]
+fn cleanup_metadata_open_read_and_unlink_failures_are_injectable() {
+    struct CandidateFs(ProbedFs);
+    impl crate::Filesystem for CandidateFs {
+        fn open_candidate(&self, path: &Path) -> std::io::Result<Box<dyn crate::FileIo>> {
+            self.0 .0.step("candidate open")?;
+            Ok(Box::new(ProbedFile {
+                file: crate::HostFilesystem.open_candidate(path)?,
+                probe: self.0 .0.clone(),
+                role: "candidate",
+            }))
+        }
+        fn symlink_metadata(&self, path: &Path) -> std::io::Result<fs::Metadata> {
+            self.0.symlink_metadata(path)
+        }
+        fn remove_file(&self, path: &Path) -> std::io::Result<()> {
+            self.0.remove_file(path)
+        }
+    }
+    for (step, fails_open) in [
+        ("entry metadata", true),
+        ("candidate open", false),
+        ("candidate metadata", true),
+        ("candidate read", false),
+        ("remove", true),
+    ] {
+        let dir = TempDir::new();
+        let path = dir.path().join("record");
+        let candidate = dir.path().join("record.create-0.tmp");
+        fs::write(&path, b"header").unwrap();
+        fs::write(&candidate, b"head").unwrap();
+        let fs = ProbedFs::default();
+        fs.0.fail(step);
+        let result =
+            crate::FileRecord::open_with(Rc::new(CandidateFs(fs)), &path, None, b"header", None);
+        assert_eq!(result.is_err(), fails_open, "{step}");
+        if let Err(error) = result {
+            assert_eq!(error.stage, "cleanup");
+        }
+        assert!(candidate.exists(), "{step}");
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn non_utf8_paths_share_the_same_publication_and_cleanup_rules() {
+    use std::os::unix::ffi::OsStrExt;
+    let dir = TempDir::new();
+    let path = dir.path().join(std::ffi::OsStr::from_bytes(b"record-\xff"));
+    let mut record = crate::FileRecord::open(&path, b"header", None).unwrap();
+    publish(&mut record, b"header").unwrap();
+    drop(record);
+    let leftover = crate::path::suffix(&path, ".retain-0.tmp");
+    fs::write(&leftover, b"leftover").unwrap();
+    let _record = crate::FileRecord::open(&path, b"header", None).unwrap();
+    assert!(!leftover.exists());
+    assert!(crate::is_temporary_path(&crate::path::suffix(
+        &path,
+        ".create-nested"
+    )));
+}
+
+#[cfg(unix)]
+#[test]
+fn reserved_and_cleanup_names_support_non_utf8_filenames() {
+    use std::os::unix::ffi::OsStrExt;
+    let path = Path::new(std::ffi::OsStr::from_bytes(b"record-\xff"));
+    let candidate = crate::path::suffix(path, ".retain-123.tmp");
+    assert!(crate::is_temporary_path(&candidate));
+    assert!(crate::path::temporary_of(path, &candidate, "retain"));
+    assert!(!crate::path::temporary_of(path, &candidate, "create"));
+    assert!(!crate::path::temporary_of(
+        path,
+        &crate::path::suffix(path, ".retain-x.tmp"),
+        "retain"
+    ));
+}
+
+#[test]
+fn a_failed_retention_restore_poisoning_is_shared_with_the_record() {
+    let dir = TempDir::new();
+    let path = dir.path().join("record");
+    fs::write(&path, b"old").unwrap();
+    let mut record = crate::FileRecord::open(&path, b"header", None).unwrap();
+    let host = ProbedFs::default();
+    let mut replacement = record.replace_with(&host).unwrap();
+    host.0.fail("retention write");
+    host.0.fail("retention cut");
+    assert_eq!(
+        kind(replacement.append(b"new bytes")),
+        ErrorKind::StorageUncertain
+    );
+    assert_eq!(read_all(&mut record), b"old");
+    assert_eq!(kind(record.append(&[])), ErrorKind::Usage);
+    assert_eq!(kind(replacement.append(&[])), ErrorKind::Usage);
+    assert_eq!(kind(replacement.commit()), ErrorKind::Usage);
+}
+
+#[test]
+fn inspection_fallback_accepts_only_permission_or_read_only_errors() {
+    struct FailedLock(std::io::ErrorKind);
+    impl crate::Filesystem for FailedLock {
+        fn lock(&self, _: &Path, _: bool) -> std::io::Result<Box<dyn std::any::Any>> {
+            Err(self.0.into())
+        }
+    }
+    let dir = TempDir::new();
+    let path = dir.path().join("record");
+    for error in [
+        std::io::ErrorKind::PermissionDenied,
+        std::io::ErrorKind::ReadOnlyFilesystem,
+    ] {
+        assert!(!crate::PathLock::acquire(&FailedLock(error), &path, true)
+            .unwrap()
+            .is_locked());
+    }
+    for error in [
+        std::io::ErrorKind::Unsupported,
+        std::io::ErrorKind::WouldBlock,
+        std::io::ErrorKind::Other,
+    ] {
+        let failure = crate::PathLock::acquire(&FailedLock(error), &path, true)
+            .err()
+            .unwrap();
+        assert_eq!(failure.stage, "lock");
+        assert_eq!(failure.source.kind(), error);
+    }
+}
+
+#[test]
+fn post_open_canonical_verification_cannot_be_skipped() {
+    struct RedirectedFs(std::cell::Cell<u32>);
+    impl crate::Filesystem for RedirectedFs {
+        fn canonicalize(&self, path: &Path) -> std::io::Result<PathBuf> {
+            let n = self.0.get() + 1;
+            self.0.set(n);
+            if n == 3 {
+                Ok(path.with_file_name("changed"))
+            } else {
+                path.canonicalize()
+            }
+        }
+    }
+    let dir = TempDir::new();
+    let path = dir.path().join("record");
+    fs::write(&path, b"header").unwrap();
+    let error = crate::FileRecord::open_with(
+        Rc::new(RedirectedFs(std::cell::Cell::new(0))),
+        &path,
+        None,
+        b"header",
+        None,
+    )
+    .err()
+    .unwrap();
+    assert_eq!(error.stage, "verify path");
+    crate::FileRecord::open(path, b"header", None).expect("failed verification released lock");
+}
+
+#[test]
+fn record_paths_reserve_every_engine_sidecar() {
+    let dir = TempDir::new();
+    for name in [
+        "record.lock",
+        "record_lock",
+        "record.create-0.tmp",
+        "record.retain-9.tmp",
+        "record_0.tmp",
+        "record.LOCK",
+    ] {
+        let path = dir.path().join(name);
+        for exists in [false, true] {
+            if exists {
+                fs::write(&path, b"sidecar").unwrap();
+            }
+            assert_eq!(
+                kind(crate::FileRecord::open(&path, b"", None)),
+                ErrorKind::Usage,
+                "{name}, exists={exists}"
+            );
+            assert_eq!(kind(crate::FileRecord::inspect(&path)), ErrorKind::Usage);
+            assert_eq!(kind(crate::PathLock::exclusive(&path)), ErrorKind::Usage);
+        }
+    }
+}
+
+#[test]
+fn a_record_cannot_replace_another_records_sidecar_lock() {
+    let dir = TempDir::new();
+    let path = dir.path().join("record");
+    let _held = crate::FileRecord::open(&path, b"", None).unwrap();
+    assert_eq!(
+        kind(crate::FileRecord::open(
+            dir.path().join("record.lock"),
+            b"",
+            None
+        )),
+        ErrorKind::Usage
+    );
+    let storage = FileStorage::open(dir.path()).unwrap();
+    assert_eq!(kind(storage.open("record.lock")), ErrorKind::Usage);
+    assert_eq!(
+        kind(crate::FileRecord::open(&path, b"", None)),
+        ErrorKind::Usage
+    );
+}
+
+#[test]
+fn named_records_reserve_path_record_sidecars() {
+    let dir = TempDir::new();
+    let storage = FileStorage::open(dir.path()).unwrap();
+    for name in ["record.lock", "record.create-0.tmp", "record.retain-9.tmp"] {
+        assert_eq!(kind(storage.open(name)), ErrorKind::Usage, "{name}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn record_sidecar_reservations_cover_symlinks_and_non_utf8_names() {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::symlink;
+    let dir = TempDir::new();
+    let sidecar = dir.path().join("record.lock");
+    let ordinary = dir.path().join("ordinary");
+    fs::write(&sidecar, b"lock").unwrap();
+    fs::write(&ordinary, b"data").unwrap();
+    symlink(&sidecar, dir.path().join("alias")).unwrap();
+    symlink(&ordinary, dir.path().join("alias.lock")).unwrap();
+    for name in ["alias", "alias.lock"] {
+        assert_eq!(
+            kind(crate::FileRecord::open(dir.path().join(name), b"", None)),
+            ErrorKind::Usage
+        );
+    }
+    for name in [
+        b"record-\xff.lock".as_slice(),
+        b"record-\xff_lock",
+        b"record-\xff_0.tmp",
+    ] {
+        assert_eq!(
+            kind(crate::FileRecord::open(
+                dir.path().join(std::ffi::OsStr::from_bytes(name)),
+                b"",
+                None
+            )),
+            ErrorKind::Usage
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn file_storage_replacements_use_the_creation_umask() {
+    const CHILD: &str = "UNEMU_CORE_FILES_TEST_UMASK_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        // Set the umask in a separate process so parallel tests keep theirs.
+        let output = Command::new("/bin/sh")
+            .args(["-c", "umask 022; exec \"$1\" --exact tests::file_storage_replacements_use_the_creation_umask --nocapture", "sh"])
+            .arg(std::env::current_exe().unwrap())
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new();
+    let storage = FileStorage::open(dir.path()).unwrap();
+    let path = dir.path().join("record");
+    let mut record = storage.open("record").unwrap();
+    for exists in [false, true] {
+        if exists {
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let mut replacement = record.replace().unwrap();
+        assert_eq!(
+            fs::metadata(dir.path().join("record_0.tmp"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o644
+        );
+        replacement.append(b"replacement").unwrap();
+        replacement.commit().unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+    }
 }

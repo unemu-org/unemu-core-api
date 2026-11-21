@@ -5,6 +5,15 @@ or **added**. Every release names the commit a consumer pins
 ([`docs/embedding.md`](docs/embedding.md)); the version rules are in
 [`docs/versioning.md`](docs/versioning.md).
 
+## Unreleased — next patch 0.3.1
+
+- **added** Correct first-writer behavior under a restrictive umask:
+  `FileRecord` and `FileStorage` retain the synchronized creation descriptor
+  after publication so appends do not require reopening the published path.
+  Path records preserve the protected file's permissions when supplied;
+  named records keep 0666 filtered by the creation umask. Replacements also
+  retain their writable descriptor. No contract or public API changes.
+
 ## 0.3.0 — 2026-11-20 — contract 0.3
 
 Commit to pin: `0d490fcb0b97320ac785b12f84a5c49e72f28b1d` (tag `v0.3.0`)

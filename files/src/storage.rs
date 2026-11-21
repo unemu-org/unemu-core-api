@@ -416,8 +416,8 @@ struct Inner {
     path: PathBuf,
     /// Whether the record's file exists.
     exists: bool,
-    /// The record's file, opened again on demand after a commit replaced
-    /// it.
+    /// The current descriptor, retained across successful publication.
+    /// An uncertain publication may require reopening the path on demand.
     data: Option<Box<dyn FileIo>>,
     host: Rc<dyn Filesystem>,
     initial: Option<Vec<u8>>,
@@ -840,7 +840,6 @@ impl Replacement for FileReplacement<'_> {
                         &e,
                     )
                 })?;
-            drop(file);
             inner.data = None;
             if self.creation {
                 if let Err(error) = fs.hard_link(&temporary, &inner.path) {
@@ -883,6 +882,9 @@ impl Replacement for FileReplacement<'_> {
                     return Err(uncertain("replacement rename", &error));
                 }
             }
+            // Creation grants write access even when the final permissions
+            // forbid reopening. Keep that access after either publication.
+            inner.data = Some(file);
             inner.exists = true;
             inner.len = self.len;
             inner.directory_unsynced = true;

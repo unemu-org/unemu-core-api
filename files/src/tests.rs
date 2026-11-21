@@ -1696,6 +1696,84 @@ fn record_sidecar_reservations_cover_symlinks_and_non_utf8_names() {
 
 #[cfg(unix)]
 #[test]
+fn creation_under_restrictive_umask_keeps_the_writable_descriptor() {
+    const CHILD: &str = "UNEMU_CORE_FILES_TEST_RESTRICTIVE_UMASK_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        // A child keeps the process-wide umask away from parallel tests.
+        let output = Command::new("/bin/sh")
+            .args(["-c", "umask 0222; exec \"$1\" --exact tests::creation_under_restrictive_umask_keeps_the_writable_descriptor --nocapture", "sh"])
+            .arg(std::env::current_exe().unwrap())
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new();
+    // Directories need write access even though newly created files do not.
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let storage = FileStorage::open(dir.path()).unwrap();
+    let mut failures = Vec::new();
+    for (name, named, protected_mode, expected_mode) in [
+        ("path", false, None, 0o400),
+        ("protected-path", false, Some(0o444), 0o400),
+        ("protected-writable-path", false, Some(0o640), 0o400),
+        ("named-append", true, None, 0o444),
+        ("named-commit", true, None, 0o444),
+    ] {
+        let path = dir.path().join(name);
+        let protected = protected_mode.map(|mode| {
+            let base = dir.path().join(format!("{name}-base"));
+            fs::write(&base, b"base").unwrap();
+            fs::set_permissions(&base, fs::Permissions::from_mode(mode)).unwrap();
+            fs::metadata(base).unwrap()
+        });
+        let mut record: Box<dyn Record> = if named {
+            storage.open(name).unwrap()
+        } else {
+            Box::new(crate::FileRecord::open(&path, b"header", protected.as_ref()).unwrap())
+        };
+        for publication in 0..2 {
+            if name == "named-append" && publication == 0 {
+                record.append(b"header").unwrap();
+            } else {
+                let mut replacement = record.replace().unwrap();
+                replacement.append(b"header").unwrap();
+                replacement.commit().unwrap();
+            }
+            if let Err(error) = record.append(b"tail") {
+                failures.push(format!("{name}: {error}"));
+                break;
+            }
+            record.sync().unwrap();
+            assert_eq!(read_all(record.as_mut()), b"headertail", "{name}");
+            assert_eq!(fs::read(&path).unwrap(), b"headertail", "{name}");
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                expected_mode,
+                "{name}"
+            );
+        }
+        if let Some(mode) = protected_mode {
+            let base = dir.path().join(format!("{name}-base"));
+            assert_eq!(fs::read(&base).unwrap(), b"base");
+            assert_eq!(
+                fs::metadata(base).unwrap().permissions().mode() & 0o777,
+                mode
+            );
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[cfg(unix)]
+#[test]
 fn file_storage_replacements_use_the_creation_umask() {
     const CHILD: &str = "UNEMU_CORE_FILES_TEST_UMASK_CHILD";
     if std::env::var_os(CHILD).is_none() {

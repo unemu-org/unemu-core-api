@@ -15,15 +15,15 @@ metadata=$(cargo metadata --format-version 1 --locked --all-features)
 
 # Declared dependencies of every kind, the package's node in the resolved
 # graph (no edges), and the graph as a whole (workspace members only).
-declared=$(jq -r '.packages[] | select(.name == "unemu-core-api") | .dependencies[] | "\(.name) (\(.kind // "normal"))"' <<< "$metadata")
-id=$(jq -r '.packages[] | select(.name == "unemu-core-api") | .id' <<< "$metadata")
-found=$(jq -r --arg id "$id" '[.resolve.nodes[] | select(.id == $id)] | length' <<< "$metadata")
+declared=$(printf %s "$metadata" | jq -r '.packages[] | select(.name == "unemu-core-api") | .dependencies[] | "\(.name) (\(.kind // "normal"))"')
+id=$(printf %s "$metadata" | jq -r '.packages[] | select(.name == "unemu-core-api") | .id')
+found=$(printf %s "$metadata" | jq -r --arg id "$id" '[.resolve.nodes[] | select(.id == $id)] | length')
 if [[ -z $id || $found != 1 ]]; then
   printf 'no-dependency: unemu-core-api is not in the resolved graph once (package id %s, %s nodes); the check cannot run\n' "${id:-none}" "$found" >&2
   exit 1
 fi
-edges=$(jq -r --arg id "$id" '.resolve.nodes[] | select(.id == $id) | .deps[] | .name' <<< "$metadata")
-foreign=$(jq -r '.workspace_members as $members | .packages[] | select(.id as $id | $members | index($id) | not) | "  \(.name) \(.version)"' <<< "$metadata")
+edges=$(printf %s "$metadata" | jq -r --arg id "$id" '.resolve.nodes[] | select(.id == $id) | .deps[] | .name')
+foreign=$(printf %s "$metadata" | jq -r '.workspace_members as $members | .packages[] | select(.id as $id | $members | index($id) | not) | "  \(.name) \(.version)"')
 
 rc=0
 if [[ -n $declared ]]; then

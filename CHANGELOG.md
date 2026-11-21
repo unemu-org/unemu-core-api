@@ -5,7 +5,9 @@ or **added**. Every release names the commit a consumer pins
 ([`docs/embedding.md`](docs/embedding.md)); the version rules are in
 [`docs/versioning.md`](docs/versioning.md).
 
-## Unreleased — next patch 0.3.1
+## 0.3.1 — 2026-11-21 — contract 0.3
+
+Commit to pin: set when the release is tagged.
 
 - **added** Correct first-writer behavior under a restrictive umask:
   `FileRecord` and `FileStorage` retain the synchronized creation descriptor

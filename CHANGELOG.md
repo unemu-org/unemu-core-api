@@ -7,7 +7,7 @@ or **added**. Every release names the commit a consumer pins
 
 ## 0.3.1 — 2026-11-21 — contract 0.3
 
-Commit to pin: set when the release is tagged.
+Commit to pin: `afba6e6b217946eb57b9556e79a30bbe53c90fb4` (tag `v0.3.1`)
 
 - **added** Correct first-writer behavior under a restrictive umask:
   `FileRecord` and `FileStorage` retain the synchronized creation descriptor

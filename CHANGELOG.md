@@ -7,6 +7,34 @@ or **added**. Every release names the commit a consumer pins
 
 ## Unreleased (0.4)
 
+- **breaking** Storage recovery now distinguishes current visibility, confirmed
+  durability, ordinary reopen and power failure. Reopen after StorageUncertain
+  permits writes without rollback. Failed appends can leave partial tails;
+  destructive cuts can discard synchronized bytes before another sync. Cores
+  recover their own formats and use replacement for whole-record preservation.
+  Failed read buffers may be partially filled and must not be consumed.
+- **breaking** Replacement append explicitly restores its previous bytes on
+  Storage failure, or permanently breaks the replacement and poisons parent
+  writes on StorageUncertain, without changing parent bytes. The test-support
+  storage now models partial uncertain appends, destructive uncertain cuts,
+  failed read prefixes and broken replacements deterministically.
+- **breaking** Replacement commit first synchronizes the current parent and
+  its name before publication, preserving its complete previous content even
+  after unsynchronized appends. A failed parent barrier prevents publication
+  and follows the failed-sync rules; no new durability is confirmed.
+- **breaking** Hosts must choose one lock domain per file: FileStorage locks
+  FILE_lock, while path records, inspection and PathLock
+  lock FILE.lock. The backend does not detect mixed access. Trusted-directory
+  and hard-link-alias limitations remain. Named record opens now reject
+  symbolic links, including dangling links, with Usage to prevent two names
+  granting two writers access to the same file. Consumer migration is in
+  [`docs/migration-0.4-storage.md`](docs/migration-0.4-storage.md).
+- **added** Every valid record name now works in FileStorage, including sidecar
+  spellings. file_name/record_name reversibly escape these names; every existing
+  usable filename mapping stays byte-identical, with no store migration.
+  File records refresh their visible length after an uncertain append or a cut
+  whose resulting length could not be read.
+
 - **breaking** Successful `Machine::finish` now enters terminal
   `Status::Finished`. Cores reject execution, reset, media changes, input
   and state I/O in Finished and Failed with Usage, including repeated finish.

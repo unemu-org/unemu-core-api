@@ -47,9 +47,13 @@ contract 0.4 (unreleased).
    exception that may leave `Halted`. Immediate media errors and failures
    of other calls follow their method-specific `Machine` rules; ordinary
    media errors preserve status, while `StorageUncertain` sets `Failed`.
-   Whatever was durable stays durable. A core does not rely on a
-   `ContentReader` detecting changed bytes. After
-   `StorageUncertain` the record is opened again before it is written.
+   Successful sync confirms durability; a later destructive cut can discard
+   those bytes even before another sync. Ordinary close/reopen preserves current
+   visibility without rollback; a power failure may lose unsynchronized changes.
+   A core recovers partial append tails in its own format and uses replacement
+   for old-or-new whole-record preservation. After `StorageUncertain` it reopens
+   before writing. It never consumes a failed read buffer as valid content and
+   does not rely on a `ContentReader` detecting changed bytes.
 7. **The machine's description.** An exact clock (`Rate`), a step unit,
    its displays, sound at a rate from 8 000 to 192 000 frames per second
    (`AudioDescription::rate_in_bounds`), its input ports and slots, all

@@ -18,8 +18,8 @@ use unemu_core_api::{Error, ErrorKind, Record, Replacement, Storage};
 ///
 /// Each record is one file, named after the record ([`crate::file_name`]).
 /// A record that does not exist opens empty, and its file appears on the
-/// first write: an `append` of at least one byte, or a commit. Names reserved
-/// for engine sidecars (see [`FileRecord`]) fail with [`ErrorKind::Usage`].
+/// first write: an `append` of at least one byte, or a commit. Every valid
+/// record name is mapped reversibly, including engine sidecar spellings.
 ///
 /// # Exclusive use
 ///
@@ -36,9 +36,16 @@ use unemu_core_api::{Error, ErrorKind, Record, Replacement, Storage};
 /// system without file locks fails the open with [`ErrorKind::Storage`]; it
 /// never opens without the lock.
 ///
-/// Do not use `FileStorage` and [`FileRecord::open`] on the same file:
-/// path records lock `FILE.lock`, while this storage locks `FILE_lock`, so
-/// the two APIs do not exclude each other.
+/// The host must never mix named and path access to the same file, even
+/// through different directories or symbolic links. Path records (including
+/// inspection and [`PathLock`]) lock `FILE.lock`; named records lock
+/// `FILE_lock`. These disjoint lock domains do not exclude each other, and
+/// the backend does not detect a host violating this precondition. Locks
+/// also do not coordinate hard-link aliases; the host must not use such
+/// aliases for one record (see [`Filesystem`]). Named opens reject symbolic
+/// links, including dangling links, because each name has a different lock.
+/// Directories must remain trusted: the host must not replace entries with
+/// aliases while records are open.
 ///
 /// The locks are those of the host's own file system (`flock` on Unix,
 /// `LockFileEx` on Windows), meant for a directory on a local disk. On a
@@ -56,7 +63,10 @@ use unemu_core_api::{Error, ErrorKind, Record, Replacement, Storage};
 /// on Unix, so the record's name survives a power cut with its bytes, even
 /// when an earlier opening created the file and crashed before its sync.
 ///
-/// [`Replacement::commit`] synchronises the new contents in a temporary
+/// [`Replacement::commit`] first synchronises the current parent and its name
+/// as [`Record::sync`] does, so even unsynchronised parent appends survive a
+/// failed publication. A failed parent barrier prevents publication and follows
+/// the failed-sync rules. It then synchronises the new contents in a temporary
 /// sibling `FILE_N.tmp`, renames it over the record's file (one atomic step
 /// on every supported host) and then makes the rename durable. On Unix that
 /// is a sync of the directory. On Windows the standard library offers no
@@ -75,11 +85,16 @@ use unemu_core_api::{Error, ErrorKind, Record, Replacement, Storage};
 /// [`ErrorKind::StorageUncertain`] when the cut fails too; a failed
 /// `truncate` answers `Storage` when the file kept its length and
 /// `StorageUncertain` otherwise; a failed `sync` is `StorageUncertain`; a
-/// commit that fails before the rename is `Storage` and leaves the record
-/// as it was, and one whose rename took place but could not be made
-/// durable is `StorageUncertain`. After `StorageUncertain` reads still
+/// commit whose parent barrier fails is also `StorageUncertain`, without
+/// publication. Other failures before rename are `Storage` and leave the
+/// record as it was; an uncertain rename or failure to make it durable is
+/// `StorageUncertain`. After `StorageUncertain` reads still
 /// work and writes fail with [`ErrorKind::Usage`] until the record is
-/// opened again.
+/// opened again. Reopening does not undo a partial tail or a destructive
+/// cut, even when the cut removed synchronized bytes. Ordinary close/reopen
+/// is not a power failure or a durability barrier. The core recovers its
+/// own record format. Replacement append rolls back its temporary or breaks
+/// the replacement and poisons the parent, without changing the parent's bytes.
 ///
 /// # Leftovers of a crash
 ///
@@ -154,8 +169,18 @@ impl Storage for FileStorage {
             return Err(usage("reserved sidecar path"));
         }
         let lock = Lock::take(&self.dir.join(format!("{file}_lock")))?;
-        remove_temporaries(&self.dir, &file);
         let path = self.dir.join(&file);
+        // Different names have different locks, so following an alias could
+        // grant two writers access to the same record.
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_symlink() => {
+                return Err(usage("named records must not be symbolic links"));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(host("cannot inspect the record's entry", &error)),
+        }
+        remove_temporaries(&self.dir, &file);
         let data = match OpenOptions::new().read(true).write(true).open(&path) {
             Ok(data) => Some(data),
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
@@ -450,6 +475,37 @@ impl Inner {
         }
     }
 
+    fn sync(&mut self) -> Result<(), Error> {
+        self.check_writable()?;
+        if !self.exists {
+            return Ok(());
+        }
+        let synced = self
+            .faults
+            .check(&self.name, Step::SyncFile)
+            .and_then(|()| self.data())
+            .and_then(|file| {
+                file.flush()?;
+                file.sync_all()
+            });
+        if let Err(error) = synced {
+            self.poisoned = true;
+            return Err(uncertain("cannot make the record durable", &error));
+        }
+        if self.directory_unsynced {
+            let synced = self
+                .faults
+                .check(&self.name, Step::SyncDirectory)
+                .and_then(|()| self.host.sync_directory(&self.path));
+            if let Err(error) = synced {
+                self.poisoned = true;
+                return Err(uncertain("cannot make the record's name durable", &error));
+            }
+            self.directory_unsynced = false;
+        }
+        Ok(())
+    }
+
     fn check_writable(&self) -> Result<(), Error> {
         if self.read_only {
             return Err(usage("an inspection record is read-only"));
@@ -470,15 +526,18 @@ impl Inner {
 /// Creation writes `FILE.create-N.tmp`, flushes and syncs it, publishes with
 /// a no-clobber hard link, removes its temporary link, checks the canonical
 /// path, cleans orphans and syncs the directory. A replacement of an existing
-/// file uses `FILE.retain-N.tmp`, preserves its exact permissions, syncs,
-/// atomically renames and syncs the directory. Numbers start at zero and skip
-/// occupied names. No journal format is interpreted.
+/// file uses `FILE.retain-N.tmp` and preserves its exact permissions. Commit
+/// syncs the current parent, syncs the temporary, atomically renames it and
+/// syncs the directory. Numbers start at zero and skip occupied names.
+/// No journal format is interpreted.
 ///
 /// Record paths must not name engine sidecars: `.lock`, `_lock`,
 /// `.create-`/`.retain-` names and `_N.tmp` replacements are reserved, also
-/// through symbolic links. Opening one fails with Usage. Do not use these
-/// path methods on a file also accessed through FileStorage: its `FILE_lock`
-/// and this API's `FILE.lock` do not exclude each other.
+/// through symbolic links. Opening one fails with Usage. The host must never
+/// use these path methods, inspection or PathLock on a file accessed by name
+/// through FileStorage: its `FILE_lock` and this API's `FILE.lock` are disjoint
+/// lock domains. This precondition is not checked by the backend. Hard-link
+/// aliases are also outside lock coordination (see Filesystem).
 ///
 /// Opening an existing path under an exclusive lock verifies its canonical
 /// path, cleans leftovers, then syncs the directory. Creation leftovers are
@@ -508,7 +567,7 @@ impl Record for FileRecord {
             let metadata = inner
                 .data()
                 .and_then(|file| file.metadata())
-                .map_err(|e| host("metadata after uncertain publication", &e))?;
+                .map_err(|e| host("metadata after uncertain write", &e))?;
             inner.len = metadata.len();
             inner.len_unknown = false;
         }
@@ -578,6 +637,7 @@ impl Record for FileRecord {
                     Ok(()) => Err(host("cannot append to the record", &error)),
                     Err(_) => {
                         inner.poisoned = true;
+                        inner.len_unknown = true;
                         Err(uncertain("cannot append to the record nor undo it", &error))
                     }
                 }
@@ -621,6 +681,8 @@ impl Record for FileRecord {
                 // Reads go on over what the file holds now, when known.
                 if let Ok(actual) = actual {
                     inner.len = actual;
+                } else {
+                    inner.len_unknown = true;
                 }
                 inner.poisoned = true;
                 Err(uncertain("cannot cut the record", &error))
@@ -629,35 +691,7 @@ impl Record for FileRecord {
     }
 
     fn sync(&mut self) -> Result<(), Error> {
-        let mut inner = self.inner.borrow_mut();
-        inner.check_writable()?;
-        if !inner.exists {
-            return Ok(());
-        }
-        let synced = inner
-            .faults
-            .check(&inner.name, Step::SyncFile)
-            .and_then(|()| inner.data())
-            .and_then(|file| {
-                file.flush()?;
-                file.sync_all()
-            });
-        if let Err(error) = synced {
-            inner.poisoned = true;
-            return Err(uncertain("cannot make the record durable", &error));
-        }
-        if inner.directory_unsynced {
-            let synced = inner
-                .faults
-                .check(&inner.name, Step::SyncDirectory)
-                .and_then(|()| inner.host.sync_directory(&inner.path));
-            if let Err(error) = synced {
-                inner.poisoned = true;
-                return Err(uncertain("cannot make the record's name durable", &error));
-            }
-            inner.directory_unsynced = false;
-        }
-        Ok(())
+        self.inner.borrow_mut().sync()
     }
 
     fn replace(&mut self) -> Result<Box<dyn Replacement>, Error> {
@@ -760,8 +794,8 @@ impl Replacement for FileReplacement<'_> {
                 match restored {
                     Ok(()) => Err(host("cannot append to the replacement", &error)),
                     Err(_) => {
-                        // Same as the in-memory storage of the contract's
-                        // tests: the record waits to be opened again.
+                        // A partial temporary must never be published, and the
+                        // parent follows the same uncertain-write rule.
                         self.broken = true;
                         let mut inner = self.inner.borrow_mut();
                         if !inner.released && inner.replacement == Some(self.number) {
@@ -792,6 +826,9 @@ impl Replacement for FileReplacement<'_> {
         };
         let fs = self.host.get();
         let result = (|| {
+            // Preserve the complete current parent if publication fails, even
+            // when it received appends while the replacement was being built.
+            inner.sync()?;
             if self.creation {
                 let initial = inner.initial.as_deref().unwrap_or_default();
                 if self.len != initial.len() as u64 {

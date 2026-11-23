@@ -12,8 +12,15 @@
 //! them: when the part of the name before its first dot is one of those
 //! device names, the file name is the name with `_` inserted after that
 //! part (`con` is `con_`, `nul.bin` is `nul_.bin`). Every other name is
-//! its own file name. A record name never holds `_`, so the mapping is
-//! reversible and never makes one record's file name another's.
+//! its own file name, except for sidecar conflicts below.
+//!
+//! A name ending in `.lock` or containing `.create-` or `.retain-` conflicts
+//! with path-record sidecars. For those names, replace every dot with `_`
+//! and surround the result with `_`: `record.lock` becomes `_record_lock_`.
+//! This takes precedence over device mapping. A record name never holds `_`,
+//! so the mapping is reversible and cannot collide with ordinary or device
+//! mappings. Previously usable names keep exactly their existing filenames;
+//! escaped names were previously rejected, so existing stores need no migration.
 //!
 //! The storage's own files beside the records hold `_` in another place:
 //! `FILE_lock` (the record's lock) and `FILE_N.tmp` (a replacement while it
@@ -28,6 +35,9 @@ pub fn file_name(name: &str) -> Option<String> {
     if !is_record_name(name) {
         return None;
     }
+    if crate::path::is_reserved_path(std::path::Path::new(name)) {
+        return Some(format!("_{}_", name.replace('.', "_")));
+    }
     let (stem, rest) = split_stem(name);
     if is_device_stem(stem) {
         Some(format!("{stem}_{rest}"))
@@ -40,21 +50,16 @@ pub fn file_name(name: &str) -> Option<String> {
 /// not a record's: the storage's lock and temporary files, and any name
 /// [`file_name`] never makes.
 pub fn record_name(file: &str) -> Option<String> {
-    let name = match file.split_once('_') {
-        Some((stem, rest)) => {
-            if !is_device_stem(stem) || !(rest.is_empty() || rest.starts_with('.')) {
-                return None;
-            }
-            format!("{stem}{rest}")
-        }
-        None => {
-            if is_device_stem(split_stem(file).0) {
-                return None;
-            }
-            file.to_owned()
+    let name = if let Some(escaped) = file.strip_prefix('_').and_then(|s| s.strip_suffix('_')) {
+        escaped.replace('_', ".")
+    } else {
+        match file.split_once('_') {
+            Some((stem, rest)) if is_device_stem(stem) => format!("{stem}{rest}"),
+            Some(_) => return None,
+            None => file.to_owned(),
         }
     };
-    is_record_name(&name).then_some(name)
+    (file_name(&name).as_deref() == Some(file)).then_some(name)
 }
 
 /// The name before its first dot, and the rest from that dot on.
@@ -170,10 +175,26 @@ mod tests {
                 names.insert(format!("{stem}{rest}"));
             }
         }
+        for stem in ["record", "con", "nul", "com9", "a.b"] {
+            for rest in [
+                ".lock",
+                ".create-0.tmp",
+                ".retain-9.tmp",
+                ".create-x",
+                ".retain-x.lock",
+            ] {
+                names.insert(format!("{stem}{rest}"));
+            }
+        }
+        names.insert(format!("{}.lock", "a".repeat(59)));
         let mut files = std::collections::BTreeSet::new();
         for name in names.iter().filter(|name| is_record_name(name)) {
             let file = file_name(name).expect("a record name has a file name");
             assert!(!is_device_stem(split_stem(&file).0), "{file}");
+            assert!(
+                !crate::path::is_reserved_path(std::path::Path::new(&file)),
+                "{file}"
+            );
             assert_eq!(record_name(&file).as_deref(), Some(name.as_str()));
             assert!(files.insert(file), "{name} shares its file name");
         }

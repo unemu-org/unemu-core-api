@@ -472,10 +472,15 @@ fn a_failed_append_that_cannot_be_undone_is_uncertain() {
         kind(record.append(b"new bytes")),
         ErrorKind::StorageUncertain
     );
-    assert_eq!(read_all(&mut *record), b"old", "reads still work");
+    assert_eq!(
+        read_all(&mut *record),
+        b"oldnew ",
+        "reads follow the partial tail"
+    );
     assert_writes_need_reopening(&mut *record);
     drop(record);
     let mut record = storage.open("r").expect("open again");
+    assert_eq!(read_all(&mut *record), b"oldnew ");
     record.append(b"!").expect("writable after reopening");
 }
 
@@ -593,9 +598,15 @@ fn a_failed_replacement_append() {
         kind(replacement.append(b"cdef")),
         ErrorKind::StorageUncertain
     );
+    assert_eq!(kind(replacement.append(b"!")), ErrorKind::Usage);
+    assert_eq!(kind(replacement.append(&[])), ErrorKind::Usage);
     assert_eq!(kind(replacement.commit()), ErrorKind::Usage);
     assert_eq!(read_all(&mut *record), b"old");
     assert_writes_need_reopening(&mut *record);
+    drop(record);
+    let mut record = storage.open("r").unwrap();
+    assert_eq!(read_all(&mut *record), b"old");
+    record.append(b"!").unwrap();
 }
 
 #[test]
@@ -719,6 +730,7 @@ fn content_whose_modification_time_changed_fails_with_content() {
 struct HostProbe {
     events: std::cell::RefCell<Vec<String>>,
     failures: std::cell::RefCell<Vec<String>>,
+    durable_record: std::cell::RefCell<Option<Vec<u8>>>,
 }
 impl HostProbe {
     fn fail(&self, step: &str) {
@@ -747,7 +759,11 @@ impl ProbedFile {
 }
 impl std::io::Read for ProbedFile {
     fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
-        self.step("read")?;
+        if let Err(error) = self.step("read") {
+            let prefix = bytes.len() / 2;
+            self.file.read_exact(&mut bytes[..prefix])?;
+            return Err(error);
+        }
         self.file.read(bytes)
     }
 }
@@ -782,7 +798,17 @@ impl crate::FileIo for ProbedFile {
     }
     fn sync_all(&mut self) -> std::io::Result<()> {
         self.step("sync")?;
-        self.file.sync_all()
+        self.file.sync_all()?;
+        if self.role == "record" {
+            // Restore only confirmed bytes when a test simulates a power cut.
+            let position = self.file.stream_position()?;
+            self.file.seek(std::io::SeekFrom::Start(0))?;
+            let mut bytes = Vec::new();
+            self.file.read_to_end(&mut bytes)?;
+            self.file.seek(std::io::SeekFrom::Start(position))?;
+            *self.probe.durable_record.borrow_mut() = Some(bytes);
+        }
+        Ok(())
     }
     fn set_permissions(&mut self, p: fs::Permissions) -> std::io::Result<()> {
         self.step("permissions")?;
@@ -1644,7 +1670,7 @@ fn a_record_cannot_replace_another_records_sidecar_lock() {
         ErrorKind::Usage
     );
     let storage = FileStorage::open(dir.path()).unwrap();
-    assert_eq!(kind(storage.open("record.lock")), ErrorKind::Usage);
+    let _escaped = storage.open("record.lock").unwrap();
     assert_eq!(
         kind(crate::FileRecord::open(&path, b"", None)),
         ErrorKind::Usage
@@ -1652,12 +1678,64 @@ fn a_record_cannot_replace_another_records_sidecar_lock() {
 }
 
 #[test]
-fn named_records_reserve_path_record_sidecars() {
+fn named_records_escape_path_sidecars_and_preserve_ordinary_mappings() {
     let dir = TempDir::new();
     let storage = FileStorage::open(dir.path()).unwrap();
-    for name in ["record.lock", "record.create-0.tmp", "record.retain-9.tmp"] {
-        assert_eq!(kind(storage.open(name)), ErrorKind::Usage, "{name}");
+    for (name, file) in [
+        ("record.lock", "_record_lock_"),
+        ("record.create-0.tmp", "_record_create-0_tmp_"),
+        ("record.retain-9.tmp", "_record_retain-9_tmp_"),
+        ("con.lock", "_con_lock_"),
+        ("a.retain-x.nested.lock", "_a_retain-x_nested_lock_"),
+        ("record", "record"),
+        ("cart.sav", "cart.sav"),
+        ("con", "con_"),
+        ("nul.bin", "nul_.bin"),
+    ] {
+        assert_eq!(crate::file_name(name).as_deref(), Some(file));
+        assert_eq!(crate::record_name(file).as_deref(), Some(name));
+        let mut record = storage.open(name).unwrap();
+        record.append(b"old").unwrap();
+        record.sync().unwrap();
+        let mut replacement = record.replace().unwrap();
+        replacement.append(b"new").unwrap();
+        replacement.commit().unwrap();
+        drop(record);
+        assert_eq!(fs::read(dir.path().join(file)).unwrap(), b"new");
+        assert_eq!(read_all(&mut *storage.open(name).unwrap()), b"new");
     }
+    for sidecar in [
+        "record.lock",
+        "record.create-0.tmp",
+        "record.retain-9.tmp",
+        "_record_lock__lock",
+        "_record_lock__0.tmp",
+    ] {
+        assert_eq!(crate::record_name(sidecar), None);
+    }
+}
+
+#[test]
+fn named_and_path_records_have_disjoint_lock_domains() {
+    let dir = TempDir::new();
+    let storage = FileStorage::open(dir.path()).unwrap();
+    let mut named = storage.open("record").unwrap();
+    named.append(b"data").unwrap();
+    named.sync().unwrap();
+    // Demonstrate the host precondition without mutating through both holders.
+    let mut path = crate::FileRecord::open(dir.path().join("record"), b"", None).unwrap();
+    assert_eq!(read_all(&mut path), b"data");
+    assert!(dir.path().join("record_lock").exists());
+    assert!(dir.path().join("record.lock").exists());
+    assert_eq!(kind(storage.open("record")), ErrorKind::Usage);
+    assert_eq!(
+        kind(crate::FileRecord::open(
+            dir.path().join("record"),
+            b"",
+            None
+        )),
+        ErrorKind::Usage
+    );
 }
 
 #[cfg(unix)]
@@ -1858,4 +1936,180 @@ fn typed_file_stages_preserve_display_source_and_error_classification() {
         let error = FileError::new(stage, std::io::Error::new(host_kind, "host failure"));
         assert_eq!(unemu_core_api::Error::from(error).kind, expected);
     }
+}
+
+#[test]
+fn failed_reads_of_records_and_replacements_can_fill_a_prefix() {
+    let dir = TempDir::new();
+    let path = dir.path().join("record");
+    fs::write(&path, b"data").unwrap();
+    let host = ProbedFs::default();
+    let mut record =
+        crate::FileRecord::open_with(Rc::new(host.clone()), &path, None, b"", None).unwrap();
+    host.0.fail("record read");
+    let mut bytes = *b"????";
+    assert_eq!(kind(record.read_at(0, &mut bytes)), ErrorKind::Storage);
+    assert_eq!(&bytes, b"da??");
+    record.read_at(0, &mut bytes).unwrap();
+    assert_eq!(&bytes, b"data");
+    let mut replacement = record.replace().unwrap();
+    replacement.append(b"next").unwrap();
+    host.0.fail("retention read");
+    bytes = *b"????";
+    assert_eq!(kind(replacement.read_at(0, &mut bytes)), ErrorKind::Storage);
+    assert_eq!(&bytes, b"ne??");
+    assert_eq!(read_all(&mut record), b"data");
+    replacement.commit().unwrap();
+    assert_eq!(read_all(&mut record), b"next");
+}
+
+#[test]
+fn failed_publication_preserves_an_unsynchronized_parent_tail_after_power_cut() {
+    let dir = TempDir::new();
+    let path = dir.path().join("record");
+    fs::write(&path, b"old").unwrap();
+    let fs = ProbedFs::default();
+    let mut record = path_record(&fs, &path);
+    record.sync().unwrap();
+    let mut replacement = record.replace().unwrap();
+    record.append(b"tail").unwrap();
+    assert_eq!(
+        fs.0.durable_record.borrow().as_deref(),
+        Some(b"old".as_slice())
+    );
+    replacement.append(b"new").unwrap();
+    fs.0.events.borrow_mut().clear();
+    fs.0.fail("rename");
+    assert_eq!(kind(replacement.commit()), ErrorKind::StorageUncertain);
+    assert_eq!(read_all(&mut record), b"oldtail");
+    drop(record);
+    // Model loss of writes made after the last successful file barrier.
+    fs::write(&path, fs.0.durable_record.borrow().as_ref().unwrap()).unwrap();
+    let mut record = path_record(&fs, &path);
+    assert_eq!(read_all(&mut record), b"oldtail");
+    let events = fs.0.events.borrow();
+    let flush = events.iter().position(|e| e == "record flush").unwrap();
+    let sync = events.iter().position(|e| e == "record sync").unwrap();
+    let rename = events.iter().position(|e| e == "rename").unwrap();
+    assert!(flush < sync && sync < rename, "{events:?}");
+}
+
+#[test]
+fn a_failed_parent_barrier_blocks_file_publication() {
+    for step in ["record flush", "record sync"] {
+        let dir = TempDir::new();
+        let path = dir.path().join("record");
+        fs::write(&path, b"old").unwrap();
+        let fs = ProbedFs::default();
+        let mut record = path_record(&fs, &path);
+        record.append(b"tail").unwrap();
+        let mut replacement = record.replace().unwrap();
+        replacement.append(b"new").unwrap();
+        fs.0.events.borrow_mut().clear();
+        fs.0.fail(step);
+        assert_eq!(
+            kind(replacement.commit()),
+            ErrorKind::StorageUncertain,
+            "{step}"
+        );
+        assert_eq!(read_all(&mut record), b"oldtail");
+        assert_eq!(kind(record.append(b"!")), ErrorKind::Usage);
+        assert!(!fs.0.events.borrow().iter().any(|e| e == "rename"));
+        assert!(!dir.files().iter().any(|name| name.contains(".retain-")));
+    }
+}
+
+#[test]
+fn a_failed_parent_name_barrier_blocks_named_publication() {
+    let dir = TempDir::new();
+    fs::write(dir.path().join("record"), b"old").unwrap();
+    let storage = FileStorage::open(dir.path()).unwrap();
+    let mut record = storage.open("record").unwrap();
+    record.append(b"tail").unwrap();
+    let mut replacement = record.replace().unwrap();
+    replacement.append(b"new").unwrap();
+    storage.fail_next("record", Step::SyncDirectory);
+    assert_eq!(kind(replacement.commit()), ErrorKind::StorageUncertain);
+    assert_eq!(read_all(&mut *record), b"oldtail");
+    assert_eq!(kind(record.append(b"!")), ErrorKind::Usage);
+    assert_eq!(fs::read(dir.path().join("record")).unwrap(), b"oldtail");
+}
+
+#[cfg(unix)]
+#[test]
+fn named_record_symlink_aliases_cannot_open_a_second_writer() {
+    let dir = TempDir::new();
+    fs::write(dir.path().join("record"), b"old").unwrap();
+    std::os::unix::fs::symlink("record", dir.path().join("alias")).unwrap();
+    let storage = FileStorage::open(dir.path()).unwrap();
+    let mut record = storage.open("record").unwrap();
+    assert_eq!(kind(storage.open("alias")), ErrorKind::Usage);
+    record.append(b"tail").unwrap();
+    assert_eq!(read_all(&mut *record), b"oldtail");
+    drop(record);
+    assert_eq!(kind(storage.open("alias")), ErrorKind::Usage);
+    assert!(fs::symlink_metadata(dir.path().join("alias"))
+        .unwrap()
+        .is_symlink());
+}
+
+#[cfg(unix)]
+#[test]
+fn named_record_dangling_symlinks_are_rejected_before_append() {
+    let dir = TempDir::new();
+    std::os::unix::fs::symlink("record", dir.path().join("alias")).unwrap();
+    let storage = FileStorage::open(dir.path()).unwrap();
+    let mut record = storage.open("record").unwrap();
+    assert_eq!(kind(storage.open("alias")), ErrorKind::Usage);
+    assert!(!dir.path().join("record").exists());
+    record.append(b"new").unwrap();
+    assert_eq!(kind(storage.open("alias")), ErrorKind::Usage);
+    assert_eq!(fs::read(dir.path().join("record")).unwrap(), b"new");
+}
+
+#[test]
+fn ordinary_reopen_keeps_unsynchronized_appends_and_destructive_cuts() {
+    let dir = TempDir::new();
+    let (storage, mut record) = record_with_old(&dir);
+    record.append(b"tail").unwrap();
+    drop(record);
+    let mut record = storage.open("r").unwrap();
+    assert_eq!(read_all(&mut *record), b"oldtail");
+    record.truncate(1).unwrap();
+    drop(record);
+    let mut record = storage.open("r").unwrap();
+    assert_eq!(read_all(&mut *record), b"o");
+}
+
+#[test]
+fn an_uncertain_cut_retries_an_unknown_length_before_reading() {
+    let dir = TempDir::new();
+    let path = dir.path().join("record");
+    fs::write(&path, b"data").unwrap();
+    let host = ProbedFs::default();
+    let mut record =
+        crate::FileRecord::open_with(Rc::new(host.clone()), &path, None, b"", None).unwrap();
+    host.0.fail("record cut after");
+    host.0.fail("record metadata");
+    assert_eq!(kind(record.truncate(1)), ErrorKind::StorageUncertain);
+    assert_eq!(read_all(&mut record), b"d");
+    assert_writes_need_reopening(&mut record);
+}
+
+#[test]
+fn a_rolled_back_replacement_append_can_commit_whole_bytes() {
+    let dir = TempDir::new();
+    let (storage, mut record) = record_with_old(&dir);
+    let mut replacement = record.replace().unwrap();
+    replacement.append(b"ab").unwrap();
+    storage.fail_next("r", Step::ReplacementWrite);
+    assert_eq!(kind(replacement.append(b"cdef")), ErrorKind::Storage);
+    let mut bytes = [0; 2];
+    replacement.read_at(0, &mut bytes).unwrap();
+    assert_eq!(&bytes, b"ab");
+    replacement.append(b"!").unwrap();
+    replacement.commit().unwrap();
+    assert_eq!(read_all(&mut *record), b"ab!");
+    drop(record);
+    assert_eq!(read_all(&mut *storage.open("r").unwrap()), b"ab!");
 }

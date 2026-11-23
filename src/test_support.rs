@@ -3,8 +3,10 @@
 //! front ends (core-contract.md §12.5). Behind the feature `test-support`.
 //!
 //! [`MemoryStorage`] keeps two copies of every record: the bytes as they are
-//! now, and the bytes that are durable, which a [`MemoryStorage::power_cut`]
-//! falls back to. Faults are planted one at a time with
+//! now, and a power-failure image, which a [`MemoryStorage::power_cut`]
+//! falls back to. Destructive cuts shorten both copies: this deterministically
+//! models a cut reaching the medium before its sync, without promising rollback.
+//! Ordinary reopen keeps current bytes. Faults are planted one at a time with
 //! [`MemoryStorage::fail_next`], so a test can drive a core through a failed
 //! write, a failed sync and both kinds of failed commit. [`MemoryContent`]
 //! fails a read on request and can stop being the verified bytes.
@@ -28,7 +30,7 @@ pub enum Operation {
     Append,
     /// [`Record::truncate`].
     Truncate,
-    /// [`Record::sync`].
+    /// [`Record::sync`], also the parent barrier before replacement publication.
     Sync,
     /// [`Record::replace`].
     Replace,
@@ -147,7 +149,9 @@ impl MemoryStorage {
             .is_some_and(|entry| entry.holder.is_some())
     }
 
-    /// Lose everything that was not made durable, as a power cut does.
+    /// Apply the scripted power-failure outcome: lose unsynchronized appends,
+    /// retain destructive cuts, and retain the chosen whole replacement.
+    /// This is one deterministic outcome, not every possible host outcome.
     ///
     /// # Panics
     ///
@@ -162,10 +166,17 @@ impl MemoryStorage {
     }
 
     /// Make the next `operation` on the record `name` fail with `error`,
-    /// once, without effect. A failure of kind
-    /// [`ErrorKind::StorageUncertain`] also leaves the record needing to be
-    /// opened again before it is written; for [`Operation::Commit`] the old
-    /// contents stay ([`MemoryStorage::uncertain_commit`] chooses).
+    /// once. Ordinary write failures have no effect. A read failure fills
+    /// the first half of a valid requested range before returning the error.
+    /// A failure of kind [`ErrorKind::StorageUncertain`] prohibits parent
+    /// writes until reopen. An uncertain append writes the first half of its
+    /// input (rounded down); an uncertain truncate applies the whole cut to
+    /// current and power-failure bytes. An uncertain replacement append
+    /// writes half its input to the temporary and permanently breaks that
+    /// replacement, leaving the parent bytes alone. An uncertain sync leaves
+    /// current bytes visible without confirming them. For [`Operation::Commit`]
+    /// the old contents stay, synchronized by commit's parent barrier
+    /// ([`MemoryStorage::uncertain_commit`] chooses publication's outcome).
     ///
     /// # Panics
     ///
@@ -186,7 +197,9 @@ impl MemoryStorage {
 
     /// Make the next commit of a replacement of the record `name` fail with
     /// [`ErrorKind::StorageUncertain`], once, after the new contents were
-    /// put in place when `takes_effect` is true and before otherwise.
+    /// put in place when `takes_effect` is true and before otherwise. The
+    /// parent barrier runs first; a planted [`Operation::Sync`] failure blocks
+    /// publication without consuming this commit fault.
     pub fn uncertain_commit(&self, name: &str, takes_effect: bool) {
         self.state.borrow_mut().faults.push(Fault {
             record: name.to_owned(),
@@ -246,6 +259,16 @@ impl MemoryRecord {
         writes: bool,
         action: impl FnOnce(&mut Entry) -> Result<R, Error>,
     ) -> Result<R, Error> {
+        self.with_entry_effect(operation, writes, |_| {}, action)
+    }
+
+    fn with_entry_effect<R>(
+        &self,
+        operation: Option<Operation>,
+        writes: bool,
+        on_uncertain: impl FnOnce(&mut Entry),
+        action: impl FnOnce(&mut Entry) -> Result<R, Error>,
+    ) -> Result<R, Error> {
         let mut guard = self.state.borrow_mut();
         let state = &mut *guard;
         let entry = state
@@ -263,6 +286,7 @@ impl MemoryRecord {
         if let Some(fault) = fault {
             if fault.error.kind == ErrorKind::StorageUncertain {
                 entry.poisoned = true;
+                on_uncertain(entry);
             }
             return Err(fault.error);
         }
@@ -276,29 +300,53 @@ impl Record for MemoryRecord {
     }
 
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), Error> {
-        self.with_entry(Some(Operation::Read), false, |entry| {
+        let fault = take_fault(
+            &mut self.state.borrow_mut().faults,
+            &self.name,
+            Operation::Read,
+        );
+        self.with_entry(None, false, |entry| {
+            if let Some(fault) = fault {
+                let prefix = buf.len() / 2;
+                let _ = read_into(&entry.current, offset, &mut buf[..prefix]);
+                if fault.error.kind == ErrorKind::StorageUncertain {
+                    entry.poisoned = true;
+                }
+                return Err(fault.error);
+            }
             read_into(&entry.current, offset, buf)
         })
     }
 
     fn append(&mut self, bytes: &[u8]) -> Result<(), Error> {
-        self.with_entry(Some(Operation::Append), true, |entry| {
-            entry.current.extend_from_slice(bytes);
-            Ok(())
-        })
+        self.with_entry_effect(
+            Some(Operation::Append),
+            true,
+            |entry| entry.current.extend_from_slice(&bytes[..bytes.len() / 2]),
+            |entry| {
+                entry.current.extend_from_slice(bytes);
+                Ok(())
+            },
+        )
     }
 
     fn truncate(&mut self, size: u64) -> Result<(), Error> {
-        self.with_entry(
+        let cut = |entry: &mut Entry| match usize::try_from(size) {
+            Ok(size) if size <= entry.current.len() => {
+                entry.current.truncate(size);
+                // A destructive cut can reach the medium before a barrier.
+                entry.durable.truncate(size);
+                Ok(())
+            }
+            _ => Err(usage("a cut never lengthens a record")),
+        };
+        self.with_entry_effect(
             Some(Operation::Truncate),
             true,
-            |entry| match usize::try_from(size) {
-                Ok(size) if size <= entry.current.len() => {
-                    entry.current.truncate(size);
-                    Ok(())
-                }
-                _ => Err(usage("a cut never lengthens a record")),
+            |entry| {
+                let _ = cut(entry);
             },
+            cut,
         )
     }
 
@@ -324,6 +372,7 @@ impl Record for MemoryRecord {
             holder: self.holder,
             number,
             bytes: Vec::new(),
+            broken: false,
         }))
     }
 }
@@ -347,6 +396,7 @@ struct MemoryReplacement {
     holder: u64,
     number: u64,
     bytes: Vec<u8>,
+    broken: bool,
 }
 
 impl Replacement for MemoryReplacement {
@@ -359,11 +409,16 @@ impl Replacement for MemoryReplacement {
     }
 
     fn append(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        if self.broken {
+            return Err(usage("the replacement must be dropped"));
+        }
         let mut guard = self.state.borrow_mut();
         let state = &mut *guard;
         if let Some(fault) = take_fault(&mut state.faults, &self.name, Operation::ReplacementAppend)
         {
             if fault.error.kind == ErrorKind::StorageUncertain {
+                self.bytes.extend_from_slice(&bytes[..bytes.len() / 2]);
+                self.broken = true;
                 if let Some(entry) = state.records.get_mut(&self.name) {
                     if entry.holder == Some(self.holder) {
                         entry.poisoned = true;
@@ -393,6 +448,13 @@ impl Replacement for MemoryReplacement {
             ));
         }
         entry.replacement = None;
+        if let Some(fault) = take_fault(&mut state.faults, &self.name, Operation::Sync) {
+            entry.poisoned = true;
+            return Err(fault.error);
+        }
+        // Publication must preserve the parent's current bytes, including any
+        // appends made after its last explicit sync.
+        entry.durable = entry.current.clone();
         match take_fault(&mut state.faults, &self.name, Operation::Commit) {
             Some(fault) => {
                 if fault.error.kind == ErrorKind::StorageUncertain {

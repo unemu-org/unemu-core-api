@@ -952,7 +952,7 @@ fn a_cut_shortens_a_record_and_never_lengthens_it() {
     let mut record = storage.open("journal").unwrap();
     record.truncate(4).unwrap();
     assert_eq!(read_all(&mut *record), b"good");
-    assert_eq!(inside.durable("journal").unwrap(), b"good tail");
+    assert_eq!(inside.durable("journal").unwrap(), b"good");
     record.sync().unwrap();
     assert_eq!(inside.durable("journal").unwrap(), b"good");
     assert_eq!(record.truncate(5).unwrap_err().kind, ErrorKind::Usage);
@@ -1052,6 +1052,64 @@ fn a_commit_that_failed_before_anything_was_put_in_place_leaves_the_record() {
 }
 
 #[test]
+fn failed_publication_preserves_an_unsynchronized_parent_tail_after_power_cut() {
+    for outcome in [None, Some(false), Some(true)] {
+        let (inside, storage) = memory();
+        inside.insert("battery", b"old");
+        let mut record = storage.open("battery").unwrap();
+        let mut replacement = record.replace().unwrap();
+        record.append(b"tail").unwrap();
+        assert_eq!(inside.durable("battery").unwrap(), b"old");
+        replacement.append(b"new").unwrap();
+        let expected_error = if let Some(takes_effect) = outcome {
+            inside.uncertain_commit("battery", takes_effect);
+            ErrorKind::StorageUncertain
+        } else {
+            inside.fail_next(
+                "battery",
+                Operation::Commit,
+                Error::new(ErrorKind::Storage, "publication failed"),
+            );
+            ErrorKind::Storage
+        };
+        assert_eq!(replacement.commit().unwrap_err().kind, expected_error);
+        drop(record);
+        inside.power_cut();
+        let mut record = storage.open("battery").unwrap();
+        let expected = if outcome == Some(true) {
+            b"new".as_slice()
+        } else {
+            b"oldtail".as_slice()
+        };
+        assert_eq!(read_all(&mut *record), expected, "{outcome:?}");
+    }
+}
+
+#[test]
+fn a_failed_parent_barrier_blocks_memory_publication() {
+    let (inside, storage) = memory();
+    inside.insert("battery", b"old");
+    let mut record = storage.open("battery").unwrap();
+    record.append(b"tail").unwrap();
+    let mut replacement = record.replace().unwrap();
+    replacement.append(b"new").unwrap();
+    inside.fail_next(
+        "battery",
+        Operation::Sync,
+        Error::new(ErrorKind::StorageUncertain, "parent sync failed"),
+    );
+    assert_eq!(
+        replacement.commit().unwrap_err().kind,
+        ErrorKind::StorageUncertain
+    );
+    assert_eq!(read_all(&mut *record), b"oldtail");
+    assert_eq!(record.append(b"!").unwrap_err().kind, ErrorKind::Usage);
+    drop(record);
+    inside.power_cut();
+    assert_eq!(inside.contents("battery").unwrap(), b"old");
+}
+
+#[test]
 fn an_uncertain_commit_needs_the_record_opened_again() {
     for takes_effect in [false, true] {
         let (inside, storage) = memory();
@@ -1090,7 +1148,7 @@ fn an_uncertain_commit_needs_the_record_opened_again() {
 }
 
 #[test]
-fn planted_faults_fire_once_without_effect() {
+fn ordinary_write_faults_fire_once_without_effect() {
     let (inside, storage) = memory();
     inside.fail_next(
         "journal",
@@ -1161,6 +1219,9 @@ fn a_failed_sync_is_uncertain_and_keeps_what_was_durable() {
     assert_eq!(read_all(&mut *record), b"one;two;");
     assert_eq!(record.sync().unwrap_err().kind, ErrorKind::Usage);
     drop(record);
+    let mut record = storage.open("journal").unwrap();
+    assert_eq!(read_all(&mut *record), b"one;two;");
+    drop(record);
     inside.power_cut();
     let mut record = storage.open("journal").unwrap();
     assert_eq!(read_all(&mut *record), b"one;");
@@ -1205,7 +1266,12 @@ fn an_uncertain_write_needs_the_record_opened_again() {
             ErrorKind::StorageUncertain,
             "{operation:?}"
         );
-        assert_eq!(read_all(&mut *record), b"base", "{operation:?}");
+        let expected = if operation == Operation::Truncate {
+            b"b".as_slice()
+        } else {
+            b"base".as_slice()
+        };
+        assert_eq!(read_all(&mut *record), expected, "{operation:?}");
         assert_eq!(
             record.append(b"y").unwrap_err().kind,
             ErrorKind::Usage,
@@ -1219,7 +1285,7 @@ fn an_uncertain_write_needs_the_record_opened_again() {
         drop(record);
         let mut record = storage.open("journal").unwrap();
         record.append(b"!").unwrap();
-        assert_eq!(read_all(&mut *record), b"base!");
+        assert_eq!(read_all(&mut *record), [expected, b"!"].concat());
     }
 }
 
@@ -2128,4 +2194,110 @@ fn geometry_and_visibility_can_change_without_a_pixel_serial_change() {
     invalid_rate.denominator = 0;
     assert!(!invalid_rate.is_clock());
     assert!(!AudioDescription::new(invalid_rate).rate_in_bounds());
+}
+
+#[test]
+fn uncertain_mutations_survive_reopen_without_rollback() {
+    for (operation, expected) in [
+        (Operation::Append, b"base-t".as_slice()),
+        (Operation::Truncate, b"b".as_slice()),
+    ] {
+        let (inside, storage) = memory();
+        inside.insert("journal", b"base");
+        let mut record = storage.open("journal").unwrap();
+        inside.fail_next(
+            "journal",
+            operation,
+            Error::new(ErrorKind::StorageUncertain, "partial mutation"),
+        );
+        let result = match operation {
+            Operation::Append => record.append(b"-tail"),
+            _ => record.truncate(1),
+        };
+        assert_eq!(result.unwrap_err().kind, ErrorKind::StorageUncertain);
+        drop(record);
+        let mut record = storage.open("journal").unwrap();
+        assert_eq!(read_all(&mut *record), expected, "{operation:?}");
+        record.append(b"!").unwrap();
+        drop(record);
+        inside.power_cut();
+        let mut record = storage.open("journal").unwrap();
+        let expected = if operation == Operation::Truncate {
+            b"b".as_slice()
+        } else {
+            b"base".as_slice()
+        };
+        assert_eq!(read_all(&mut *record), expected);
+    }
+}
+
+#[test]
+fn a_destructive_cut_can_remove_confirmed_bytes_before_sync() {
+    let (inside, storage) = memory();
+    inside.insert("journal", b"base");
+    let mut record = storage.open("journal").unwrap();
+    record.truncate(1).unwrap();
+    drop(record);
+    inside.power_cut();
+    let mut record = storage.open("journal").unwrap();
+    assert_eq!(read_all(&mut *record), b"b");
+}
+
+#[test]
+fn an_uncertain_replacement_append_is_broken_even_after_reopen() {
+    let (inside, storage) = memory();
+    inside.insert("battery", b"old");
+    let mut record = storage.open("battery").unwrap();
+    let mut replacement = record.replace().unwrap();
+    inside.fail_next(
+        "battery",
+        Operation::ReplacementAppend,
+        Error::new(ErrorKind::StorageUncertain, "temporary rollback failed"),
+    );
+    assert_eq!(
+        replacement.append(b"newer").unwrap_err().kind,
+        ErrorKind::StorageUncertain
+    );
+    assert_eq!(read_all(&mut *record), b"old");
+    assert_eq!(record.append(b"!").unwrap_err().kind, ErrorKind::Usage);
+    assert_eq!(replacement.append(b"!").unwrap_err().kind, ErrorKind::Usage);
+    drop(record);
+    let mut record = storage.open("battery").unwrap();
+    assert_eq!(read_all(&mut *record), b"old");
+    assert_eq!(replacement.append(&[]).unwrap_err().kind, ErrorKind::Usage);
+    assert_eq!(replacement.commit().unwrap_err().kind, ErrorKind::Usage);
+    record.append(b"!").unwrap();
+}
+
+#[test]
+fn a_failed_record_read_can_fill_only_a_prefix() {
+    let (inside, storage) = memory();
+    inside.insert("journal", b"data");
+    let mut record = storage.open("journal").unwrap();
+    inside.fail_next(
+        "journal",
+        Operation::Read,
+        Error::new(ErrorKind::Storage, "read interrupted"),
+    );
+    let mut bytes = *b"????";
+    assert_eq!(
+        record.read_at(0, &mut bytes).unwrap_err().kind,
+        ErrorKind::Storage
+    );
+    assert_eq!(&bytes, b"da??");
+    record.read_at(0, &mut bytes).unwrap();
+    assert_eq!(&bytes, b"data");
+}
+
+#[test]
+fn portable_names_include_file_backend_sidecar_spellings() {
+    let (_, storage) = memory();
+    for name in ["record.lock", "record.create-0.tmp", "record.retain-9.tmp"] {
+        assert!(is_record_name(name));
+        let mut record = storage.open(name).unwrap();
+        record.append(name.as_bytes()).unwrap();
+        record.sync().unwrap();
+        drop(record);
+        assert_eq!(read_all(&mut *storage.open(name).unwrap()), name.as_bytes());
+    }
 }

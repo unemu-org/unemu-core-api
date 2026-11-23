@@ -135,10 +135,12 @@ pub trait Machine {
     ///
     /// A `Storage` or `StorageUncertain` failure while the guest halts
     /// (making its writes durable) may leave the status [`Status::Halted`]
-    /// instead, so the session can still be finished. Whatever was durable
-    /// stays durable; after an uncertain commit the record holds the old or
-    /// the new contents, whole. The front end retries by dropping the
-    /// machine and creating it again.
+    /// instead, so the session can still be finished. Storage follows
+    /// [`crate::Record`]: a destructive cut can discard synchronized bytes;
+    /// a failed append may leave a partial tail. Replacement preserves old
+    /// or new contents whole. The front end retries by dropping the machine
+    /// and creating it again; reopening allows writes without rolling back
+    /// to the last successful sync. The core recovers its own record format.
     fn run(&mut self, limit: RunLimit) -> Result<Stop, Error>;
 
     /// The picture of a display at the last completed boundary.
@@ -231,11 +233,12 @@ pub trait Machine {
     /// End the session cleanly: make everything written durable and close
     /// it as complete and enter [`Status::Finished`]. In Failed or Finished
     /// it returns `Usage` without work; a second successful finish is forbidden.
-    /// A failed `finish` leaves the status [`Status::Failed`]; what was
-    /// durable before
-    /// it stays durable. Dropping a machine without `finish` is the
-    /// equivalent of a power cut: what was already durable stays, and
-    /// nothing is marked complete.
+    /// A failed `finish` leaves the status [`Status::Failed`]. Storage follows
+    /// [`crate::Record`], including destructive cuts and partial tails;
+    /// replacement preserves old or new contents whole. Dropping a machine
+    /// without `finish` performs no durability barrier and marks nothing
+    /// complete. An ordinary recreate sees current storage, without rollback;
+    /// an actual power failure may lose unsynchronized changes.
     fn finish(&mut self) -> Result<Finished, Error>;
 
     /// Move the core's messages since the last call to the end of `out`. A

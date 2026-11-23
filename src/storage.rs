@@ -34,6 +34,8 @@ pub trait ContentReader {
     /// [`crate::ErrorKind::Storage`] when the host read failed. The guest
     /// sees neither: the core reports the failure from the call doing the I/O
     /// (for example [`crate::Machine::run`] or [`crate::Machine::change_medium`]).
+    /// On any failure, `buf` may be partially filled; callers must not consume
+    /// it as valid content.
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), Error>;
 }
 
@@ -76,7 +78,9 @@ pub trait Storage {
     /// because a name is how a later run finds what an earlier one kept. A
     /// name a host file system treats specially, such as the device names
     /// `con`, `nul` or `com1` of Windows, is the file-backed
-    /// implementation's to map; a core need not avoid it. Fails with
+    /// implementation's to map; a core need not avoid it. Every name accepted
+    /// by `is_record_name` must be usable on every storage; backend sidecar
+    /// names impose no additional restriction. Fails with
     /// [`crate::ErrorKind::Usage`] when the name breaks these rules or the
     /// record is already open, here or in another program, and with
     /// [`crate::ErrorKind::Storage`] when the host failed.
@@ -138,31 +142,45 @@ pub const fn is_kept_record_name(name: &str) -> bool {
     true
 }
 
-/// One durable sequence of bytes, held exclusively.
+/// One persistent sequence of bytes, held exclusively.
 ///
-/// Failures: a [`crate::ErrorKind::Storage`] failure of `append` or
-/// `truncate` leaves the record as it was; an implementation that cannot
-/// undo a partial write answers [`crate::ErrorKind::StorageUncertain`]. A
-/// failed `sync` is `StorageUncertain`. After `StorageUncertain` from any
-/// call, reads still work and every write (`append`, `truncate`, `sync`,
-/// `replace`) fails with [`crate::ErrorKind::Usage`] until the record is
-/// opened again; opened again, it holds what was durable, and after an
-/// uncertain commit the old or the new contents, whole.
+/// Reads and `size` describe the currently visible bytes. Successful `append`
+/// and `truncate` change visibility immediately; their durability is confirmed
+/// only by a successful `sync`, as far as the host can confirm it. Closing and
+/// reopening is not a durability barrier and does not undo visible changes.
+/// A power failure can lose unsynchronized changes or leave a partial append.
+/// Confirmed bytes remain durable unless a later destructive operation removes
+/// them: `truncate` can discard even previously synchronized bytes before its
+/// own `sync`. Use [`Replacement`] when the old or new record must stay whole.
 ///
-/// Dropping the object releases the record. It promises nothing about
-/// bytes appended since the last `sync`.
+/// A [`crate::ErrorKind::Storage`] failure of `append` or `truncate` leaves
+/// the visible record as it was. An implementation that cannot undo a partial
+/// write answers [`crate::ErrorKind::StorageUncertain`]. A failed `sync` is
+/// `StorageUncertain` and does not confirm any new durability. After
+/// `StorageUncertain` from any call, reads remain available (and may themselves
+/// fail), while every write (`append`, `truncate`, `sync`, `replace`, and a
+/// pending replacement's `commit`) fails with [`crate::ErrorKind::Usage`]
+/// until the record is opened again. Reopening clears that prohibition; it
+/// does not roll back to the last successful sync. A failed append may leave
+/// a partial tail; recovery belongs to the core's record format. An uncertain
+/// replacement publication instead leaves the old or new contents, whole.
+/// Failure of commit's preliminary parent sync follows the failed-sync rules.
+///
+/// Dropping the object releases the record without a durability barrier.
 pub trait Record {
     /// The length in bytes now.
     fn size(&self) -> Result<u64, Error>;
 
     /// Fill `buf` with the bytes at `offset`. Reading past the end fails
-    /// with [`crate::ErrorKind::Usage`].
+    /// with [`crate::ErrorKind::Usage`]. On any failure, `buf` may be partially
+    /// filled; callers must not consume it as valid content.
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), Error>;
 
-    /// Add `bytes` at the end. They are durable only after `sync`.
+    /// Add `bytes` at the end. Durability is confirmed only after `sync`.
     fn append(&mut self, bytes: &[u8]) -> Result<(), Error>;
 
-    /// Cut the record to its first `size` bytes. Durable only after `sync`.
+    /// Cut the record to its first `size` bytes. Durability is confirmed only
+    /// after `sync`; the cut can discard synchronized bytes even before that.
     /// A `size` beyond the end fails with [`crate::ErrorKind::Usage`]: a cut
     /// never lengthens a record.
     fn truncate(&mut self, size: u64) -> Result<(), Error>;
@@ -187,18 +205,31 @@ pub trait Replacement {
 
     /// Fill `buf` with the new contents at `offset`, to check them before
     /// they are committed. Reading past the end fails with
-    /// [`crate::ErrorKind::Usage`].
+    /// [`crate::ErrorKind::Usage`]. On any failure, `buf` may be partially
+    /// filled; callers must not consume it as valid content.
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), Error>;
 
     /// Add `bytes` at the end of the new contents.
+    /// A [`crate::ErrorKind::Storage`] failure restores the replacement's
+    /// previous bytes and leaves it appendable and committable. If rollback
+    /// fails, return [`crate::ErrorKind::StorageUncertain`]: the replacement
+    /// must be dropped, and further append (including empty append) and commit
+    /// return [`crate::ErrorKind::Usage`]. The parent's bytes remain unchanged,
+    /// but its writes and pending commits are prohibited until reopen, just
+    /// as for any uncertain record write. Reads remain available. Reopening
+    /// the parent does not make this broken replacement usable.
     fn append(&mut self, bytes: &[u8]) -> Result<(), Error>;
 
-    /// Make the new contents durable and put them in place of the old ones
-    /// in one step: after a crash the record holds the old bytes or the
-    /// new ones, complete, never a mixture. On `Ok` the record this came
-    /// from reads and appends to the new contents.
+    /// First synchronize the parent's current contents, including mutations
+    /// made while this replacement was being built. If that barrier fails,
+    /// return [`crate::ErrorKind::StorageUncertain`] without publication;
+    /// the usual failed-sync rules apply, with no new durability confirmed.
+    /// Once it succeeds, make the new contents durable and put them in place
+    /// in one step: after a crash the record holds the previous complete
+    /// contents or the new ones, never a mixture. On `Ok` the record this
+    /// came from reads and appends to the new contents.
     ///
-    /// A failure before anything was put in place is
+    /// After the parent barrier, a failure before anything was put in place is
     /// [`crate::ErrorKind::Storage`] and leaves the record as it was. When
     /// the host cannot say which contents the record holds now, the failure
     /// is [`crate::ErrorKind::StorageUncertain`], and the record must be

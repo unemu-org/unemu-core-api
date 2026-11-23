@@ -24,14 +24,15 @@ fn from_major_one_a_front_end_drives_every_minor_of_its_major() {
 }
 
 #[test]
-fn this_source_is_contract_zero_three_and_drives_itself() {
-    assert_eq!(CONTRACT, ContractVersion::new(0, 3));
+fn this_source_is_contract_zero_four_and_drives_itself() {
+    assert_eq!(CONTRACT, ContractVersion::new(0, 4));
     assert!(CONTRACT.drives(CONTRACT));
-    assert_eq!(CONTRACT.to_string(), "0.3");
+    assert_eq!(CONTRACT.to_string(), "0.4");
 }
 
 #[test]
-fn this_source_refuses_a_core_written_for_contract_zero_two() {
+fn this_source_refuses_earlier_contract_minors() {
+    assert!(!CONTRACT.drives(ContractVersion::new(0, 3)));
     assert!(!CONTRACT.drives(ContractVersion::new(0, 2)));
     assert!(!CONTRACT.drives(ContractVersion::new(0, 1)));
 }
@@ -171,7 +172,7 @@ impl Machine for Counter {
 
     fn frame(&mut self, display: DisplayId) -> Result<Frame<'_>, Error> {
         if display != DisplayId(0) {
-            return Err(Error::new(ErrorKind::Unsupported, "no such display"));
+            return Err(Error::new(ErrorKind::Usage, "no such display"));
         }
         self.pixels[1] = self.now as u32;
         // The left column is overscan.
@@ -281,7 +282,7 @@ static PLATFORMS: [PlatformDescription; 1] = [PlatformDescription::new("counter"
     .with_content(&TAPE_KINDS)];
 
 static DESCRIPTION: CoreDescription =
-    CoreDescription::new(ContractVersion::new(0, 3), "counter", "Counter", "0.0.2")
+    CoreDescription::new(ContractVersion::new(0, 4), "counter", "Counter", "0.0.2")
         .with_platforms(&PLATFORMS)
         .with_notices(&[Notice::new("nothing", "no third-party parts")]);
 
@@ -299,7 +300,7 @@ impl Core for CounterCore {
     fn create(&self, request: &CreateRequest<'_>) -> Result<Box<dyn Machine>, Error> {
         let validated = self.validate(request.platform, request.config)?;
         if !request.options.is_empty() {
-            return Err(Error::new(ErrorKind::Config, "unknown option"));
+            return Err(Error::new(ErrorKind::Usage, "unknown option"));
         }
         let tape = &validated.content[0];
         request.content.open(&tape.sha256, tape.size)?;
@@ -339,6 +340,12 @@ impl Core for CounterCore {
     }
 
     fn identify(&self, content: &OfferedContent<'_>) -> Result<Option<Identified>, Error> {
+        if content.size != content.bytes.size() {
+            return Err(Error::new(
+                ErrorKind::Content,
+                "inconsistent offered length",
+            ));
+        }
         if content.size < 5 {
             return Ok(None);
         }
@@ -490,7 +497,7 @@ fn cores_and_machines_are_driven_as_trait_objects() {
     let refused = core.create(&request.with_options(&[("speed", "fast")]));
     assert_eq!(
         refused.err().map(|error| error.kind),
-        Some(ErrorKind::Config)
+        Some(ErrorKind::Usage)
     );
 }
 
@@ -526,7 +533,7 @@ fn validate_refuses_a_broken_config_with_diagnostics() {
 struct BareCore;
 
 static BARE: CoreDescription =
-    CoreDescription::new(ContractVersion::new(0, 3), "bare", "Bare", "0.0.1");
+    CoreDescription::new(ContractVersion::new(0, 4), "bare", "Bare", "0.0.1");
 
 impl Core for BareCore {
     fn description(&self) -> &CoreDescription {
@@ -1691,7 +1698,7 @@ fn resets_preserve_counters_and_media_and_clear_controls_and_pending_input() {
             m.add_medium(SlotId(0), test_medium(WriteTarget::ReadOnly))
                 .unwrap();
             m.change_medium(SlotId(0), MediaAction::Insert(0)).unwrap();
-            let position = InputEvent::pointer_position(PortId(0), Some((10, 20)));
+            let position = InputEvent::pointer_position(PortId(2), Some((10, 20)));
             m.input(position.clone()).unwrap();
             m.input(InputEvent::key(PortId(0), Key::A, KeyState::Pressed))
                 .unwrap();
@@ -1994,7 +2001,7 @@ fn invalid_rates_clocks_frames_and_duplicate_ids_are_rejected() {
 #[test]
 fn release_all_preserves_absolute_pointer_position_and_input_order() {
     let mut m = scripted();
-    let position = InputEvent::pointer_position(PortId(0), Some((3, 4)));
+    let position = InputEvent::pointer_position(PortId(2), Some((3, 4)));
     let key = InputEvent::key(PortId(0), Key::A, KeyState::Pressed);
     for event in [position.clone(), key, InputEvent::ReleaseAll] {
         m.input(event).unwrap();
@@ -2010,11 +2017,11 @@ fn saved_states_restore_counters_status_and_all_input_variants_and_drop_audio() 
         InputEvent::key(PortId(0), Key::A, KeyState::Pressed),
         InputEvent::key(PortId(0), Key::B, KeyState::Repeated),
         InputEvent::key(PortId(0), Key::C, KeyState::Released),
-        InputEvent::pointer_motion(PortId(0), -7, 9),
-        InputEvent::pointer_button(PortId(0), 1, true),
-        InputEvent::pad(PortId(0), PadControl::Select, true),
-        InputEvent::pointer_position(PortId(0), Some((u16::MAX, 42))),
-        InputEvent::pointer_position(PortId(0), None),
+        InputEvent::pointer_motion(PortId(1), -7, 9),
+        InputEvent::pointer_button(PortId(1), 1, true),
+        InputEvent::pad(PortId(3), PadControl::Select, true),
+        InputEvent::pointer_position(PortId(2), Some((u16::MAX, 42))),
+        InputEvent::pointer_position(PortId(2), None),
     ];
     for status in [Status::Ready, Status::Halted, Status::Off] {
         let mut source = scripted();
@@ -2300,4 +2307,162 @@ fn portable_names_include_file_backend_sidecar_spellings() {
         drop(record);
         assert_eq!(read_all(&mut *storage.open(name).unwrap()), name.as_bytes());
     }
+}
+
+#[test]
+fn invalid_run_options_are_usage_and_do_not_acquire_storage() {
+    let storage = MemoryStorage::new();
+    let content = Tapes {
+        sha256: [7; 32],
+        bytes: b"CNTR\x01".to_vec(),
+    };
+    let config = tape_config([7; 32], 5);
+    let core: &dyn Core = &CounterCore;
+    let request = CreateRequest::new(
+        "counter",
+        config.as_document(),
+        &content,
+        Rc::new(storage.clone()),
+    )
+    .with_options(&[("unknown", "true")]);
+    assert_eq!(core.create(&request).err().unwrap().kind, ErrorKind::Usage);
+    assert!(!storage.is_open("counter.battery"));
+}
+
+#[test]
+fn invalid_display_handles_are_usage_and_preserve_machine_observations() {
+    let content = Tapes {
+        sha256: [7; 32],
+        bytes: b"CNTR\x01".to_vec(),
+    };
+    let config = tape_config([7; 32], 5);
+    let mut machine = CounterCore
+        .create(&CreateRequest::new(
+            "counter",
+            config.as_document(),
+            &content,
+            Rc::new(MemoryStorage::new()),
+        ))
+        .unwrap();
+    let before = (machine.now(), machine.steps(), machine.status());
+    assert_eq!(
+        machine.frame(DisplayId(255)).unwrap_err().kind,
+        ErrorKind::Usage
+    );
+    assert_eq!((machine.now(), machine.steps(), machine.status()), before);
+    assert!(machine.frame(DisplayId(0)).is_ok());
+}
+
+#[test]
+fn inconsistent_offered_length_is_content_before_any_parsing_reads() {
+    let bytes = MemoryContent::new(b"CNTR\x01".to_vec());
+    bytes.fail_next(Error::new(ErrorKind::Storage, "must not read"));
+    let core: &dyn Core = &CounterCore;
+    let offered = OfferedContent::new("image", [7; 32], 6, &bytes);
+    assert_eq!(
+        core.identify(&offered).unwrap_err().kind,
+        ErrorKind::Content
+    );
+    assert_eq!(
+        bytes.read_at(0, &mut [0]).unwrap_err().kind,
+        ErrorKind::Storage
+    );
+}
+
+#[test]
+fn config_validation_cannot_promise_content_or_storage_success() {
+    let core: &dyn Core = &CounterCore;
+    let config = tape_config([7; 32], 5);
+    assert!(core.validate("counter", config.as_document()).is_ok());
+    let missing = Tapes {
+        sha256: [8; 32],
+        bytes: b"CNTR\x01".to_vec(),
+    };
+    let storage = MemoryStorage::new();
+    let request = CreateRequest::new(
+        "counter",
+        config.as_document(),
+        &missing,
+        Rc::new(storage.clone()),
+    );
+    assert_eq!(
+        core.create(&request).err().unwrap().kind,
+        ErrorKind::Content
+    );
+    let content = Tapes {
+        sha256: [7; 32],
+        bytes: b"CNTR\x01".to_vec(),
+    };
+    storage.fail_next(
+        "counter.battery",
+        Operation::Open,
+        Error::new(ErrorKind::Storage, "cannot open"),
+    );
+    let request = CreateRequest::new("counter", config.as_document(), &content, Rc::new(storage));
+    assert_eq!(
+        core.create(&request).err().unwrap().kind,
+        ErrorKind::Storage
+    );
+    assert!(core.validate("counter", config.as_document()).is_ok());
+}
+
+#[test]
+fn invalid_input_ports_and_controls_preserve_queue_and_status() {
+    let invalid = [
+        InputEvent::key(PortId(99), Key::A, KeyState::Pressed),
+        InputEvent::pointer_motion(PortId(99), 1, 2),
+        InputEvent::pointer_button(PortId(99), 0, true),
+        InputEvent::pointer_position(PortId(99), None),
+        InputEvent::pad(PortId(99), PadControl::A, true),
+        InputEvent::pointer_motion(PortId(0), 1, 2),
+        InputEvent::pointer_button(PortId(0), 0, true),
+        InputEvent::pointer_position(PortId(0), None),
+        InputEvent::pad(PortId(0), PadControl::A, true),
+        InputEvent::key(PortId(1), Key::A, KeyState::Pressed),
+        InputEvent::pointer_position(PortId(1), None),
+        InputEvent::pointer_motion(PortId(2), 1, 2),
+        InputEvent::pointer_button(PortId(1), 3, true),
+        InputEvent::pointer_button(PortId(2), 1, true),
+        InputEvent::pointer_button(PortId(3), 0, true),
+        InputEvent::pad(PortId(3), PadControl::B, true),
+    ];
+    for status in [Status::Ready, Status::Halted] {
+        let mut m = scripted_status(status);
+        let queued = InputEvent::key(PortId(0), Key::A, KeyState::Pressed);
+        m.input(queued.clone()).unwrap();
+        let before = (m.now(), m.steps(), m.applied_input().to_vec());
+        for event in &invalid {
+            let machine: &mut dyn Machine = &mut m;
+            assert_eq!(
+                machine.input(event.clone()).unwrap_err().kind,
+                ErrorKind::Usage
+            );
+            assert_eq!(m.status(), status);
+            assert_eq!(m.queued_input(), std::slice::from_ref(&queued));
+            assert_eq!((m.now(), m.steps(), m.applied_input().to_vec()), before);
+        }
+    }
+}
+
+#[test]
+fn advertised_input_controls_queue_in_order_at_run_boundary() {
+    let mut m = scripted();
+    let events = vec![
+        InputEvent::ReleaseAll,
+        InputEvent::key(PortId(0), Key::A, KeyState::Pressed),
+        InputEvent::pointer_motion(PortId(1), 1, -2),
+        InputEvent::pointer_button(PortId(1), 2, true),
+        InputEvent::pointer_position(PortId(2), Some((10, 20))),
+        InputEvent::pointer_button(PortId(2), 0, true),
+        InputEvent::pad(PortId(3), PadControl::Select, true),
+    ];
+    for event in &events {
+        m.input(event.clone()).unwrap();
+    }
+    assert_eq!(m.queued_input(), events);
+    assert!(m.applied_input().is_empty());
+    m.run(RunLimit::at_steps(0)).unwrap();
+    assert!(m.queued_input().is_empty());
+    assert_eq!(m.applied_input(), &events[1..]);
+    assert_eq!((m.now(), m.steps()), (Ticks(0), 0));
 }

@@ -1,7 +1,8 @@
 # Migrating the 0.4 API shapes
 
-This is the first part of the unreleased breaking 0.4 minor. Package versions,
-CONTRACT and release pins still name 0.3 until release preparation. The table
+This is the API-shape part of the breaking 0.4.0 release; start at the
+[single migration index](migration-0.4.md). Both packages and CONTRACT now
+state 0.4; exact release pins move together after tagging. The table
 lists source and behavior changes required by this part. Existing valid rates,
 scalar IDs, ownership bounds, content representations and storage interfaces
 continue to work.
@@ -66,5 +67,5 @@ READ — concrete migration sites in the local consumer source snapshots:
 
 These sites were read, not edited or built. Audit consumer tests and other
 adapters for the same patterns. Neither existing core advertises saved state;
-keep that feature absent until implemented. No dependency revision, package
-version or implements value should be updated until the coordinated release.
+keep that feature absent until implemented. Update dependency revisions and implements literals together as described
+in the migration index.

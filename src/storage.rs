@@ -36,6 +36,9 @@ pub trait ContentReader {
     /// (for example [`crate::Machine::run`] or [`crate::Machine::change_medium`]).
     /// On any failure, `buf` may be partially filled; callers must not consume
     /// it as valid content.
+    ///
+    /// Only Usage, Content and Storage are allowed. Content is unchanged; a failed
+    /// buffer may be partial.
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), Error>;
 }
 
@@ -84,6 +87,9 @@ pub trait Storage {
     /// [`crate::ErrorKind::Usage`] when the name breaks these rules or the
     /// record is already open, here or in another program, and with
     /// [`crate::ErrorKind::Storage`] when the host failed.
+    ///
+    /// Only Usage and Storage are allowed. Failure returns no record handle and
+    /// releases any acquired ownership; no existing bytes are changed.
     fn open(&self, name: &str) -> Result<Box<dyn Record>, Error>;
 }
 
@@ -169,44 +175,71 @@ pub const fn is_kept_record_name(name: &str) -> bool {
 /// Dropping the object releases the record without a durability barrier.
 pub trait Record {
     /// The length in bytes now.
+    ///
+    /// Only Storage is allowed, for host I/O. No bytes or durability change.
     fn size(&self) -> Result<u64, Error>;
 
     /// Fill `buf` with the bytes at `offset`. Reading past the end fails
     /// with [`crate::ErrorKind::Usage`]. On any failure, `buf` may be partially
     /// filled; callers must not consume it as valid content.
+    ///
+    /// Only Usage (invalid range) and Storage (host I/O) are allowed. No bytes or
+    /// durability change; a failed buffer may be partial.
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), Error>;
 
     /// Add `bytes` at the end. Durability is confirmed only after `sync`.
+    ///
+    /// Allowed errors: Usage (writes prohibited), Storage (previous bytes
+    /// restored), StorageUncertain (partial tail possible, writes poisoned until
+    /// reopen). No new durability is confirmed on failure.
     fn append(&mut self, bytes: &[u8]) -> Result<(), Error>;
 
     /// Cut the record to its first `size` bytes. Durability is confirmed only
     /// after `sync`; the cut can discard synchronized bytes even before that.
     /// A `size` beyond the end fails with [`crate::ErrorKind::Usage`]: a cut
     /// never lengthens a record.
+    ///
+    /// Allowed errors: Usage (writes prohibited or size past end), Storage
+    /// (previous bytes restored), StorageUncertain (destructive cut possible,
+    /// writes poisoned until reopen). No new durability is confirmed on failure.
     fn truncate(&mut self, size: u64) -> Result<(), Error>;
 
     /// Make everything appended and cut so far durable. When this returns
     /// `Ok`, the host has confirmed the bytes as far as it confirms
     /// anything. A host that cannot confirm fails; it never pretends. A
-    /// failure is always [`crate::ErrorKind::StorageUncertain`].
+    /// attempted barrier failure is [`crate::ErrorKind::StorageUncertain`];
+    /// a prohibited call instead returns Usage without attempting a barrier.
+    ///
+    /// Only Usage (writes prohibited) and StorageUncertain (barrier failed, writes
+    /// poisoned until reopen) are allowed. Failure confirms no new durability.
     fn sync(&mut self) -> Result<(), Error>;
 
     /// Start new contents for this record beside the old ones. The record
     /// keeps its old bytes, readable and appendable, until the replacement
     /// is committed. One replacement exists at a time: a second one while
     /// the first lives fails with [`crate::ErrorKind::Usage`].
+    ///
+    /// Only Usage (writes prohibited or another replacement lives) and Storage
+    /// (host I/O) are allowed. Failure preserves parent bytes and returns no
+    /// replacement.
     fn replace(&mut self) -> Result<Box<dyn Replacement>, Error>;
 }
 
 /// New contents of a record, while they are written.
 pub trait Replacement {
     /// The length of the new contents now.
+    ///
+    /// Only Storage is allowed, for host I/O. Parent and replacement bytes stay
+    /// unchanged.
     fn size(&self) -> Result<u64, Error>;
 
     /// Fill `buf` with the new contents at `offset`, to check them before
     /// they are committed. Reading past the end fails with
     /// [`crate::ErrorKind::Usage`]. On any failure, `buf` may be partially
     /// filled; callers must not consume it as valid content.
+    ///
+    /// Only Usage (invalid range) and Storage (host I/O) are allowed. Parent and
+    /// replacement bytes stay unchanged; a failed buffer may be partial.
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), Error>;
 
     /// Add `bytes` at the end of the new contents.
@@ -218,6 +251,9 @@ pub trait Replacement {
     /// but its writes and pending commits are prohibited until reopen, just
     /// as for any uncertain record write. Reads remain available. Reopening
     /// the parent does not make this broken replacement usable.
+    ///
+    /// Only Usage, Storage and StorageUncertain are allowed, with rollback and
+    /// poisoning as described above. No new durability is confirmed on failure.
     fn append(&mut self, bytes: &[u8]) -> Result<(), Error>;
 
     /// First synchronize the parent's current contents, including mutations
@@ -237,5 +273,10 @@ pub trait Replacement {
     /// the new contents, whole. A replacement whose record was released (its
     /// object dropped) fails with [`crate::ErrorKind::Usage`] and changes
     /// nothing. Dropping a replacement without `commit` discards it.
+    ///
+    /// Only Usage, Storage and StorageUncertain are allowed. Usage changes nothing;
+    /// Storage preserves the parent; StorageUncertain prohibits parent writes until
+    /// reopen, with the barrier/publication distinction above. The replacement is
+    /// consumed on every result.
     fn commit(self: Box<Self>) -> Result<(), Error>;
 }

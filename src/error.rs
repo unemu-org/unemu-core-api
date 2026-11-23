@@ -60,10 +60,12 @@ pub enum ErrorKind {
     /// A host read or write of the machine's storage or of its content
     /// failed. The guest never sees it.
     Storage,
-    /// A saved state does not fit this machine.
+    /// A saved-state document is malformed or does not fit this machine.
+    /// Host I/O while reading it is Storage instead.
     State,
     /// The call is not valid in the machine's current status, or not valid
-    /// for the object it was made on.
+    /// for the object it was made on, including invalid handles, arguments
+    /// and run-only options. A rejected config document is Config instead.
     Usage,
     /// A host write failed in a way that leaves it unknown whether it took
     /// effect. The object it was made on must be opened again before it is

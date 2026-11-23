@@ -24,7 +24,8 @@ is no operating system.
 
 Cores that implement it: [unemupc](https://github.com/unemu-org/unemupc),
 an IBM PC/AT-class machine, and [unemunes](https://github.com/unemu-org/unemunes),
-an NES, implement contract 0.2 and move to 0.3 next.
+an NES, are migrating to contract 0.4; the [migration index](docs/migration-0.4.md)
+lists the coordinated source and pin changes.
 The front end lives in unemupc's repository for now.
 
 The normative text is the crate's documentation comments and
@@ -38,8 +39,8 @@ core and a front end must do.
 Pin the commit of a release tag, as an exact revision:
 
 ```toml
-# The contract between front ends and cores, at the commit of release v0.3.0.
-unemu-core-api = { version = "0.3", git = "https://github.com/unemu-org/unemu-core-api", rev = "afba6e6b217946eb57b9556e79a30bbe53c90fb4" }
+# The contract between front ends and cores, at the commit of release v0.4.0.
+unemu-core-api = { version = "0.4", git = "https://github.com/unemu-org/unemu-core-api", rev = "<commit of the release>" }
 ```
 
 Never a branch, never a tag name, never a `path` dependency and never a
@@ -62,7 +63,7 @@ in memory. Enable it for a core's or a front end's tests only:
 
 ```toml
 [dev-dependencies]
-unemu-core-api = { version = "0.3", git = "https://github.com/unemu-org/unemu-core-api", rev = "afba6e6b217946eb57b9556e79a30bbe53c90fb4", features = ["test-support"] }
+unemu-core-api = { version = "0.4", git = "https://github.com/unemu-org/unemu-core-api", rev = "<commit of the release>", features = ["test-support"] }
 ```
 
 ## Storage and content over host files
@@ -70,8 +71,9 @@ unemu-core-api = { version = "0.3", git = "https://github.com/unemu-org/unemu-co
 `unemu-core-files`, in [`files/`](files/), is the contract's objects over
 host files: `FileStorage`, a directory of records, one file each, held
 through a file lock, synchronised and replaced in one atomic step, and
-`FileContent`, verified content read from a file at any offset. A front
-end links it, and so does a core's own command line, which is a front end
+`FileContent`, content read from a file at any offset after boundary verification.
+Its constructors check length, not a digest; later change detection is best
+effort. A front end links it, and so does a core's own command line, which is a front end
 of one core. A core library never does: it takes the objects a front end
 hands in, so it also runs where there are no files. It is the one crate of
 this repository that touches the host, and its tests run on Linux, macOS
@@ -79,7 +81,7 @@ and Windows. It is versioned with the contract and pinned at the same
 revision:
 
 ```toml
-unemu-core-files = { version = "0.3", git = "https://github.com/unemu-org/unemu-core-api", rev = "afba6e6b217946eb57b9556e79a30bbe53c90fb4" }
+unemu-core-files = { version = "0.4", git = "https://github.com/unemu-org/unemu-core-api", rev = "<commit of the release>" }
 ```
 
 - [`docs/versioning.md`](docs/versioning.md): what a version number means
@@ -87,6 +89,8 @@ unemu-core-files = { version = "0.3", git = "https://github.com/unemu-org/unemu-
 - [`docs/embedding.md`](docs/embedding.md): how a core and a front end
   depend on the crate, and why there is only ever one copy in a build.
 - [`docs/conformance.md`](docs/conformance.md): what a core must hold.
+- [`docs/migration-0.4.md`](docs/migration-0.4.md): the consumer migration index.
+- [`docs/libretro.md`](docs/libretro.md): the accepted extension plan after 1.0.
 
 ## Building
 

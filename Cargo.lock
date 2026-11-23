@@ -4,11 +4,11 @@ version = 4
 
 [[package]]
 name = "unemu-core-api"
-version = "0.3.1"
+version = "0.4.0"
 
 [[package]]
 name = "unemu-core-files"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "unemu-core-api",
 ]

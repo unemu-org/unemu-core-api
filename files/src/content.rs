@@ -34,6 +34,10 @@ pub struct FileContent {
 impl FileContent {
     /// Open the file at `path`, whose verified length is `size`.
     ///
+    /// Checks length only; it does not compute or verify a digest. The front
+    /// end must first verify full SHA-256 and length, without sampling. Prefer
+    /// [`Self::from_file`] with the same retained handle used for hashing.
+    /// Later change detection is best effort, not an immutable snapshot.
     /// Fails with [`ErrorKind::Storage`] when the file cannot be opened and
     /// with [`ErrorKind::Content`] when its length is not `size`.
     pub fn open(path: impl AsRef<Path>, size: u64) -> Result<Self, Error> {
@@ -44,7 +48,10 @@ impl FileContent {
     /// Content over a file already open for reading, such as the one the
     /// front end hashed, whose verified length is `size`.
     ///
-    /// Fails as [`FileContent::open`] does.
+    /// Checks length, not a digest, and records metadata for best-effort
+    /// detection of later changes. It does not guarantee an immutable snapshot.
+    /// The caller verifies full SHA-256 and length before handing it to a core.
+    /// Fails as [`FileContent::open`] does; on failure no object is returned.
     pub fn from_file(file: File, size: u64) -> Result<Self, Error> {
         let metadata = file
             .metadata()

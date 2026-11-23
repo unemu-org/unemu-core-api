@@ -12,6 +12,8 @@
 //! fails a read on request and can stop being the verified bytes.
 
 //! [`ScriptedMachine`] models machine calls, statuses, media and saved state.
+//! From 1.0 this feature's public API follows the same SemVer rules as the
+//! rest of the crate; test-only use does not exempt public helpers.
 
 use crate::{is_record_name, ContentReader, Error, ErrorKind, Record, Replacement, Storage};
 use std::cell::{Cell, RefCell};

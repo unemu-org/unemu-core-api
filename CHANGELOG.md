@@ -5,7 +5,37 @@ or **added**. Every release names the commit a consumer pins
 ([`docs/embedding.md`](docs/embedding.md)); the version rules are in
 [`docs/versioning.md`](docs/versioning.md).
 
-## Unreleased (0.4)
+## 0.4.0 — 2026-11-23 — contract 0.4
+
+Commit to pin: `<commit of the release>`
+
+Breaking 0.4 completes the contract review: terminal Finished status,
+immediate media changes and honest storage guarantees. 1.0 comes later,
+after compatibility review; libretro stays after 1.0, NES first. Consumers
+start at the [single migration index](docs/migration-0.4.md).
+
+- **breaking** Both packages are 0.4.0 and CONTRACT is 0.4. Coordinate core
+  implements literals and exact git pins across the dependency graph.
+- **breaking** Every fallible Core/Machine/content/storage method now has an
+  exhaustive error/effect matrix. Unknown/duplicate/invalid run options and
+  invalid display ids use Usage. Invalid input ports, event kinds for a port,
+  pointer buttons and unadvertised pad controls return Usage without changing
+  the input queue. Default identify rejects receipt-size mismatches with Content.
+  Keep StorageUncertain distinct. Validation
+  checks config only for equal platform/config and baseline options; it
+  cannot promise create success. Content lists describe identity sets, ignoring
+  order, duplicates, labels and repeated/cached opens.
+- **added** Content implements ContentReader to normalize Bytes/Reader without
+  allocation, read-ahead or rehash. Unnegotiated sources keep those baseline
+  representations; future variants need version, absence, advertisement and
+  fallback rules. Full SHA-256 plus length stays at the boundary, without
+  sampling. FileContent constructors check length and detect later changes
+  best effort; they do not verify a digest.
+- **added** External baseline core/front-end compatibility fixtures cover
+  default methods, trait objects, content forms, wildcard enum handling and
+  failed storage. Public test-support APIs are explicitly covered by SemVer
+  from 1.0. Versioning documents future registry packaging work; publish flags
+  stay false. The accepted libretro extension plan adds no API now.
 
 - **breaking** Storage recovery now distinguishes current visibility, confirmed
   durability, ordinary reopen and power failure. Reopen after StorageUncertain
@@ -38,6 +68,7 @@ or **added**. Every release names the commit a consumer pins
 - **breaking** Successful `Machine::finish` now enters terminal
   `Status::Finished`. Cores reject execution, reset, media changes, input
   and state I/O in Finished and Failed with Usage, including repeated finish.
+  Status rejections preserve status; only finalization I/O failures set Failed.
   `Machine::input` returns `Result<(), Error>`; front ends must handle it.
   Inspection and drains remain available; terminal `set_outputs` is ignored.
 - **breaking** The Machine call/status matrix is explicit in its trait docs
@@ -149,7 +180,7 @@ the contract names no file system or path type.
   start with it. `add_medium` fails with `Usage` for a name outside the
   rules; the core opens the record at the latest when the medium is
   inserted. From 0.4, the opening call reports failure immediately (see
-  Unreleased above).
+  0.4.0 above).
 - **added** `Storage`, `Record` and `Replacement`: records a machine holds
   exclusively, appended to, cut and synchronised, and replaced whole in one
   step (`Record::replace`, `Replacement::commit`). `is_record_name` states

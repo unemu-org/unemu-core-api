@@ -23,10 +23,22 @@ pub trait Core: Send + Sync {
     ///
     /// Reads the config document, takes every blob it names from
     /// `request.content`, and keeps what must outlive the run only in
-    /// records of `request.storage`. Fails with [`crate::ErrorKind::Config`],
-    /// `Content` or `Unsupported`; a failed create leaves nothing running
-    /// and nothing half-written that a later create could mistake for a
-    /// session.
+    /// records of `request.storage`.
+    ///
+    /// Allowed errors: `Unsupported` for an unavailable platform, config type
+    /// or recognised content the core cannot run (including a damaged image);
+    /// `Usage` for invalid arguments or run-only options (unknown keys,
+    /// duplicate keys or invalid values); `Config` for a rejected config;
+    /// `Content` for a missing/mismatched receipt or detected changed bytes;
+    /// `Storage` for host I/O; `StorageUncertain` for an uncertain write.
+    /// Reject unavailable operations before checking arguments. Config-only
+    /// checks agree with `validate` for equal platform/config and baseline
+    /// (empty) options; content, storage and option-dependent checks may still fail.
+    ///
+    /// A failed create leaves no machine running and releases acquired records.
+    /// It leaves no half-written data a later create could mistake for a session.
+    /// It does not promise storage rollback: Record recovery and uncertainty
+    /// rules still apply, and confirmed destructive cuts remain destructive.
     fn create(&self, request: &CreateRequest<'_>) -> Result<Box<dyn Machine>, Error>;
 
     /// Say whether this core runs `content`, and as what.
@@ -38,29 +50,44 @@ pub trait Core: Send + Sync {
     /// recognises the content and cannot run it, such as a cartridge
     /// board it does not model; the message names what is missing, and
     /// the front end shows it instead of "unknown file". Fails with
-    /// `Content` or `Storage` as [`ContentReader::read_at`] did.
+    /// `Content` or `Storage` as [`ContentReader::read_at`] did. A mismatched
+    /// offered receipt (such as size != bytes.size()) is Content too.
+    /// These are the only allowed errors; a core must not leak its own
+    /// out-of-range parsing reads as caller Usage. No state changes on error.
     ///
     /// The core reads what it needs through `content.bytes`: a header,
     /// or all of it. It keeps nothing: the call builds no machine and
     /// changes no state. The same bytes give the same answer in every
     /// run of one release of the core.
     ///
-    /// The default answers `Ok(None)`: a core that opens no content
-    /// recognises nothing.
+    /// The default checks the offered size, then answers `Ok(None)`: a core
+    /// that opens no content recognises nothing.
     fn identify(&self, content: &OfferedContent<'_>) -> Result<Option<Identified>, Error> {
-        let _ = content;
+        if content.size != content.bytes.size() {
+            return Err(Error::new(
+                ErrorKind::Content,
+                "offered content size mismatch",
+            ));
+        }
         Ok(None)
     }
 
     /// Check a config document without building a machine, and name the
     /// content it needs.
     ///
-    /// Fails with [`ErrorKind::Config`], with diagnostics, as `create`
-    /// would for the same document, and with `Unsupported` for a platform
-    /// or a config type the core does not read. On success `create` asks
-    /// its [`ContentSource`] for exactly the listed content. A front end
-    /// verifies that content before it calls `create`; a store-side
-    /// validator can be written over this call alone.
+    /// Config-only checks agree with `create` for the same platform and
+    /// document with baseline (empty) run-only options. This does not check
+    /// content bytes, content-dependent hardware support, storage or options,
+    /// and does not promise creation success. Allowed errors: `Unsupported`
+    /// for an unavailable platform/config type or config-only unsupported
+    /// feature, and `Config` for a rejected document, with diagnostics when
+    /// available. No state changes or I/O, on success or failure.
+    ///
+    /// On successful creation with those baseline options, the identities
+    /// requested from [`ContentSource`] equal the listed (SHA-256, length)
+    /// set. Order, duplicate references and repeated/cached opens have no
+    /// meaning; labels are descriptive only. Failed creation may ask for a
+    /// subset. A front end verifies the content before calling `create`.
     ///
     /// The default answers `Unsupported`.
     fn validate(&self, platform: &str, config: ConfigDocument<'_>) -> Result<Validated, Error> {
@@ -293,7 +320,7 @@ pub struct CreateRequest<'a> {
     /// `content`.
     pub storage: Rc<dyn Storage>,
     /// Run-only options, by the keys the platform describes. An unknown key
-    /// is refused.
+    /// is refused with `Usage`, as are duplicate keys and invalid values.
     pub options: &'a [(&'a str, &'a str)],
 }
 
@@ -364,12 +391,26 @@ impl ConfigDocumentBuf {
 /// the receipt and does not hash again. This keeps layered disk images
 /// possible: a base is read-only content named by its digest, and a chain
 /// of hash-linked layers can later stand behind the same answer.
+///
+/// Without explicit capability negotiation, a source must keep supplying
+/// [`Content::Bytes`] or [`Content::Reader`], including to newer cores.
+/// Every future representation must document its introduction minor, what
+/// absence means, capability advertisement and a Bytes/Reader fallback.
+/// Enum non-exhaustiveness alone does not negotiate support. Verification
+/// stays at this boundary: full SHA-256 and length, no sampling, no core rehash.
 pub trait ContentSource {
     /// The exact bytes with this digest and length.
+    ///
+    /// Allowed errors: `Content` for a missing/mismatched receipt or detected
+    /// post-verification change; `Storage` for host I/O. No content is changed
+    /// and no handle is returned on error. Repeated opens are allowed.
     fn open(&self, sha256: &[u8; 32], size: u64) -> Result<Content, Error>;
 }
 
-/// Verified read-only content.
+/// Verified read-only content. Implements [`ContentReader`] so cores can
+/// read either backing without matching variants, copying the whole content
+/// or hashing again. The implementation neither verifies nor strengthens
+/// the source's receipt or best-effort change detection.
 #[non_exhaustive]
 pub enum Content {
     /// Small content, in memory.
@@ -388,6 +429,33 @@ impl fmt::Debug for Content {
                 .debug_struct("Reader")
                 .field("size", &reader.size())
                 .finish(),
+        }
+    }
+}
+
+/// Normalize both representations without allocating or reading ahead.
+impl ContentReader for Content {
+    fn size(&self) -> u64 {
+        match self {
+            Self::Bytes(bytes) => bytes.len() as u64,
+            Self::Reader(reader) => reader.size(),
+        }
+    }
+
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), Error> {
+        match self {
+            Self::Bytes(bytes) => {
+                let range = usize::try_from(offset).ok().and_then(|start| {
+                    start
+                        .checked_add(buf.len())
+                        .and_then(|end| bytes.get(start..end))
+                });
+                let source =
+                    range.ok_or_else(|| Error::new(ErrorKind::Usage, "read past the end"))?;
+                buf.copy_from_slice(source);
+                Ok(())
+            }
+            Self::Reader(reader) => reader.read_at(offset, buf),
         }
     }
 }

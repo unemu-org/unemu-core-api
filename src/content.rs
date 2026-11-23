@@ -192,8 +192,11 @@ impl Identified {
 #[non_exhaustive]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Validated {
-    /// Every piece of content [`crate::Core::create`] will ask its
-    /// [`crate::ContentSource`] for.
+    /// Content identities needed by successful [`crate::Core::create`] with
+    /// equal platform/config and baseline options: the set of (SHA-256, length)
+    /// pairs, not an access trace. Order and duplicates have no meaning;
+    /// labels are descriptive. Creation may cache or repeat opens and may
+    /// fail before requesting the whole set.
     pub content: Vec<ContentRef>,
 }
 

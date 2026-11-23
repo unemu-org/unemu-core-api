@@ -1,8 +1,9 @@
 # Migrating the 0.4 storage guarantees
 
-This is the storage part of the unreleased breaking 0.4 minor, alongside
-[`migration-0.4-shapes.md`](migration-0.4-shapes.md). Package versions,
-CONTRACT and release pins still name 0.3. The storage traits and their
+This is the storage part of the breaking 0.4.0 release, alongside
+[`migration-0.4-shapes.md`](migration-0.4-shapes.md); start at the
+[single migration index](migration-0.4.md). Both packages and CONTRACT
+now state 0.4; exact release pins move together after tagging. The storage traits and their
 signatures stay unchanged; consumers must update recovery assumptions.
 
 | Operation or outcome | Required consumer behavior |
@@ -86,6 +87,6 @@ was edited or built for this part.
   replacement battery tests and add replacement-append poisoning and partial
   read coverage. Do not infer general rollback from a chosen power_cut case.
 
-No dependency pin, package version or implements declaration changes until
-coordinated release preparation. These are source-review findings; downstream
+Coordinate dependency pins and implements declarations as described in the
+migration index. These are source-review findings; downstream
 conformance after migration must be measured in each consumer repository.

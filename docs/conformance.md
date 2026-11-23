@@ -3,12 +3,12 @@
 The documentation comments say what each call must do. This list is what
 they cannot say about a core as a whole. It is the checklist a new core,
 and every change to a core, is reviewed against. It is the list of
-contract 0.4 (unreleased).
+contract 0.4.
 
 1. **The dependency.** The crate by the exact revision of a release tag
    ([`embedding.md`](embedding.md)), never a path, a branch or a copy; a
    gitignored patch for local work. `CoreDescription::implements` is a
-   literal, such as `ContractVersion::new(0, 3)`.
+   literal, such as `ContractVersion::new(0, 4)`.
 2. **The description.** A core id, its platforms, their config types and
    options, its notices. A platform that a person can start from a file
    lists its `ContentKind`s with their extensions, and at least one config
@@ -31,8 +31,9 @@ contract 0.4 (unreleased).
    content by digest and size, never by name, with the platform's
    defaults. It reads only through the offered `ContentReader`, keeps
    nothing and answers the same for the same bytes. A core whose `create`
-   reads configs implements `validate`, which fails as `create` would and
-   lists exactly the content `create` asks for.
+   reads configs implements `validate`: config-only checks agree with `create`
+   for equal platform/config and baseline options, without promising creation
+   success. Its content list is an identity set, not an access trace (see below).
 6. **Content by digest, storage as records.** `create` takes every blob
    from the `ContentSource` by the digest and size its config names, and
    keeps what outlives a run only in records of the `Storage` it is given.
@@ -168,7 +169,8 @@ A non-removable slot cannot be extended. Compatible catalogue aliases
 with the same base identity, format and kept-record name reuse the held
 record when selected; they do not reopen an exclusively held record.
 
-A failed finish leaves Failed; a second finish after success returns Usage.
+Finalization I/O failures leave Failed; a second finish after success returns
+Usage and preserves Finished.
 Failed sessions cannot be marked complete: drop/recreate is the contract's
 recovery path. Read-only inspection and drains remain available in both
 terminal statuses. `set_outputs` has no error return and is ignored there.
@@ -193,3 +195,85 @@ or commits external records. Incompatible external data is rejected with
 State. Any failed load preserves all observable state, queues and external
 records; it may consume the input reader. Neither real core currently
 advertises saved state; the scripted test-support machine pins these rules.
+
+## Errors and validation
+
+There are eight error kinds; this release adds none. Config rejects a config
+document, Usage rejects invalid handles/arguments/options, Unsupported rejects
+an unavailable operation or recognised content the core cannot run (including
+malformed image formats). Content means a missing/mismatched receipt or a
+detected post-verification change, not an image-format diagnosis. Storage is
+host I/O, State rejects a saved-state document, and Guest reports emulation
+failure. StorageUncertain is an uncertain write, never flattened to Storage
+or a warning. Method-specific reset rules retain the existing Guest exception.
+
+The allowed kinds below are exhaustive for 0.4. An implementation translates
+its internal errors at the adapter; a core's own invalid parsing read must not
+escape as caller Usage. Apply status rejections first, then absent-operation
+Unsupported, then argument checks, as in the call/status matrix. Halted/Off run
+short-circuits remain as specified there. No call below advances virtual time
+except run; successful load restores saved time. A status rejection preserves
+state, even for finish; finalization I/O failure instead sets Failed.
+
+| Fallible method | Allowed error kinds | Effect on failure |
+| --- | --- | --- |
+| `Core::create` | Config, Usage, Unsupported, Content, Storage, StorageUncertain | No running machine; acquired records released; no half-written session mistaken as complete. Record recovery applies; no storage rollback promised. |
+| `Core::identify` | Unsupported, Content, Storage | No retained machine, content or state; a mismatched offered receipt is Content. Foreign bytes return None; recognised unmodelled/damaged images use Unsupported. |
+| `Core::validate` | Config, Unsupported | Config-only check; no state changes or I/O. Unsupported covers unavailable platform/type or config-only unsupported feature. |
+| `Machine::run` | Usage, Unsupported, Guest, Content, Storage, StorageUncertain | Usage/Unsupported before execution preserve state/input. Execution errors set Failed; halt-time Storage/StorageUncertain may leave Halted. |
+| `Machine::frame` | Usage, Unsupported, Content, Storage | Status, guest state and last completed picture unchanged. Invalid display id is Usage when picture output exists; no initial picture may also be Usage. |
+| `Machine::drain_audio` | Unsupported, Content, Storage | Status and guest state unchanged. Partial append to out and consumed pending audio are possible; discard the failed append. |
+| `Machine::input` | Usage, Unsupported | Status and queue unchanged. Invalid port/control is Usage; an unavailable event operation, including an unknown variant, is Unsupported. |
+| `Machine::add_medium` | Usage, Unsupported, Content, Storage, StorageUncertain | Ordinary failure preserves catalogue/insertion/status; uncertainty sets Failed. |
+| `Machine::change_medium` | Usage, Unsupported, Content, Storage, StorageUncertain | Ordinary failure preserves catalogue/insertion/status; uncertainty sets Failed. |
+| `Machine::reset` | Usage, Unsupported, Guest, Content, Storage, StorageUncertain | Counters and queue preserved. Status preserved except uncertainty sets Failed, or may retain Halted. |
+| `Machine::save_state` | Usage, Unsupported, Content, Storage | All machine state, queues, status and records unchanged; output may contain an incomplete document, to discard. |
+| `Machine::load_state` | Usage, Unsupported, State, Storage | All observable state, queues and records unchanged; reader may be consumed. Host I/O is Storage, not State. |
+| `Machine::finish` | Usage, Storage, StorageUncertain | Status rejection preserves status; finalization I/O failure sets Failed, with no storage rollback promised. |
+| `ContentSource::open` | Content, Storage | No handle returned, no content changed; missing or mismatched receipt is Content. |
+| `ContentReader::read_at` | Usage, Content, Storage | Content unchanged; failed buffer may be partial and must not be consumed as valid. |
+| `Storage::open` | Usage, Storage | No handle returned; acquired ownership released; existing record bytes unchanged. |
+| `Record::size` | Storage | Bytes and durability unchanged. |
+| `Record::read_at` | Usage, Storage | Bytes and durability unchanged; failed buffer may be partial. |
+| `Record::append` | Usage, Storage, StorageUncertain | Usage has no effect; Storage restores previous bytes; uncertainty may leave a partial tail and poisons writes until reopen. No new durability confirmed. |
+| `Record::truncate` | Usage, Storage, StorageUncertain | Usage has no effect; Storage restores previous bytes; uncertainty may discard confirmed bytes and poisons writes until reopen. No new durability confirmed. |
+| `Record::sync` | Usage, StorageUncertain | Usage rejects prohibited writes; failed barrier confirms no new durability and poisons writes until reopen. |
+| `Record::replace` | Usage, Storage | Parent unchanged, no replacement returned. |
+| `Replacement::size` | Storage | Parent and replacement bytes unchanged. |
+| `Replacement::read_at` | Usage, Storage | Parent and replacement bytes unchanged; failed buffer may be partial. |
+| `Replacement::append` | Usage, Storage, StorageUncertain | Usage has no effect; Storage restores temporary bytes. Uncertainty breaks the replacement permanently and poisons parent writes without changing parent bytes. |
+| `Replacement::commit` | Usage, Storage, StorageUncertain | Consumed on every result. Usage changes nothing; Storage preserves parent. Uncertain parent barrier blocks publication, confirms no new durability and poisons writes; uncertain publication leaves old/new whole and poisons writes. |
+
+For equal platform/config and baseline (empty) run-only options, validate and
+create agree only on config-only checks. Validate cannot inspect content,
+storage, options or content-dependent hardware support, so success does not
+promise create success. On successful creation the requested (SHA-256, length)
+identity set equals Validated.content. Order, duplicate references, labels and
+repeated or cached opens do not define an access trace. A failed create may
+request only a subset. Front ends compare identity sets, not vectors or logs.
+
+## Content-source compatibility
+
+Unnegotiated sources continue supplying Bytes or Reader, including to newer
+cores. Future Content variants must specify their introduction minor, absence
+meaning, capability advertisement and Bytes/Reader fallback. A wildcard that
+rejects a new variant does not make that variant interoperable. Existing cores
+can keep matching both baseline representations; new cores can use Content as
+a ContentReader without matching or copying a whole image.
+
+The boundary verifies full SHA-256 plus length before handing over content:
+no sampling, including large hard-disk images, and no core rehash. Prefer hashing
+and retaining the same handle. FileContent::open/from_file check length and
+record metadata; neither verifies a digest. Later changes are detected best
+effort, not as an immutable snapshot guarantee. Layers can remain behind Reader;
+bases stay read-only, sector writes go through the core's overlay interface,
+and commit/export creates a new base without rewriting the old one.
+
+Compatibility tests in tests/ compile external Core/Machine implementations
+and drive trait objects. The baseline core leaves identify/validate defaults
+alone and advertises no optional machine facilities. Both content forms,
+unknown-to-the-fixture enum cases via wildcards, and failed storage are covered.
+Construction tests cover default fields and extensible patterns. Feature-gated
+public test-support helpers are themselves part of the API from 1.0. These are
+source checks in one unified Cargo build, not a stable binary ABI or a claim
+that separately released consumer adapters have been migrated and tested.

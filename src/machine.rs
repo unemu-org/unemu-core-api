@@ -87,7 +87,8 @@ use std::io::{Read, Write};
 /// with the same base identity, format and kept-record name reuse the held
 /// record when selected; they do not reopen an exclusively held record.
 ///
-/// A failed finish leaves Failed; a second finish after success returns Usage.
+/// Finalization I/O failures leave Failed; a second finish after success returns
+/// Usage and preserves Finished.
 /// Failed sessions cannot be marked complete: drop/recreate is the contract's
 /// recovery path. Read-only inspection and drains remain available in both
 /// terminal statuses. `set_outputs` has no error return and is ignored there.
@@ -141,6 +142,11 @@ pub trait Machine {
     /// or new contents whole. The front end retries by dropping the machine
     /// and creating it again; reopening allows writes without rolling back
     /// to the last successful sync. The core recovers its own record format.
+    ///
+    /// Allowed errors: `Usage` for a status/argument rejection and `Unsupported`
+    /// for unavailable frame stops, both before execution and with state/input
+    /// unchanged. Execution errors are only `Guest`, `Storage`, `StorageUncertain`
+    /// and `Content`, with the status effects above.
     fn run(&mut self, limit: RunLimit) -> Result<Stop, Error>;
 
     /// The picture of a display at the last completed boundary.
@@ -152,6 +158,11 @@ pub trait Machine {
     /// readable. Before the first completed picture a core may return
     /// `Usage` or a blank frame of its initial geometry. Front ends must
     /// handle both. The borrow ends before the next call on the machine.
+    ///
+    /// Allowed errors: `Usage` for an invalid display id or no initial picture;
+    /// `Unsupported` for unavailable picture output; `Storage` or `Content` for
+    /// backing reads. No status, guest state or last completed picture changes.
+    /// An invalid id on a machine with picture output is Usage, not Unsupported.
     fn frame(&mut self, display: DisplayId) -> Result<Frame<'_>, Error>;
 
     /// Move the sound rendered up to `now()` since the last call to the end
@@ -166,6 +177,11 @@ pub trait Machine {
     /// [`Machine::load_state`], are dropped; after `load_state` the index
     /// follows the loaded `now()`. A front
     /// end may rely on this to keep sound and picture together.
+    ///
+    /// Allowed errors: `Unsupported` when audio output is unavailable, `Storage`
+    /// or `Content` for backing reads. Status and guest state stay unchanged.
+    /// On failure `out` may have a partial append; discard that append. Pending
+    /// audio may have been drained and is not promised to be replayable.
     fn drain_audio(&mut self, out: &mut Vec<[i16; 2]>) -> Result<(), Error>;
 
     /// Say which outputs the front end consumes now. A core need not render
@@ -176,6 +192,10 @@ pub trait Machine {
     /// `run`, in order, at `now()`. The core owns everything after that:
     /// encoding, repeat, device back-pressure, coalescing and overflow.
     /// Returns `Usage` in Off, Failed or Finished, without queuing the event.
+    ///
+    /// Allowed errors: `Usage` for an invalid status, port, control or argument;
+    /// `Unsupported` for an unavailable event operation, including an unknown
+    /// variant. Failure preserves status and the input queue.
     fn input(&mut self, event: InputEvent) -> Result<(), Error>;
 
     /// Every slot's state now. Reading it takes the activity seen since the
@@ -188,11 +208,23 @@ pub trait Machine {
     /// Fails with [`crate::ErrorKind::Usage`] when
     /// the medium's [`crate::WriteTarget::Kept`] names a record outside the
     /// rules of [`crate::is_kept_record_name`].
+    ///
+    /// Allowed errors: `Usage` for status, invalid slot/medium/kept name or
+    /// arguments; `Unsupported` for unavailable extension or unsupported format;
+    /// `Content` for receipt integrity; `Storage` for host I/O; `StorageUncertain`
+    /// for uncertain writes. Ordinary failures preserve catalogue, insertion and
+    /// status; uncertainty sets Failed. No guest execution or time passes.
     fn add_medium(&mut self, slot: SlotId, medium: NewMedium<'_>) -> Result<usize, Error>;
 
     /// Change what a slot holds immediately, before returning success.
     /// Requires `Features::media_changes`. Required content/record opens
     /// complete here; their failure is returned here, never on a later run.
+    ///
+    /// Allowed errors: `Usage` for status, invalid slot/index/action arguments;
+    /// `Unsupported` for unavailable selection; `Content` for receipt integrity;
+    /// `Storage` for host I/O; `StorageUncertain` for uncertain writes. Ordinary
+    /// failures preserve catalogue, insertion and status; uncertainty sets Failed.
+    /// No guest execution or time passes.
     fn change_medium(&mut self, slot: SlotId, action: MediaAction) -> Result<(), Error>;
 
     /// Reset the machine. Fails with `Unsupported` for a kind the
@@ -202,6 +234,11 @@ pub trait Machine {
     /// `Halted`, so its session can still be finished). A
     /// `StorageUncertain` failure leaves the status [`Status::Failed`], or
     /// `Halted` for a machine that was halted, as in [`Machine::run`].
+    ///
+    /// Allowed errors: `Usage`, `Unsupported`, `Guest`, `Content`, `Storage`
+    /// and `StorageUncertain`. Rejections and Content preserve status, as do
+    /// Storage and Guest above. StorageUncertain sets Failed, except that Halted
+    /// may remain Halted. Every failure preserves counters and queued input.
     fn reset(&mut self, kind: ResetKind) -> Result<(), Error>;
 
     /// A token naming everything a saved state depends on: the core's
@@ -218,6 +255,11 @@ pub trait Machine {
     /// Write the whole machine state at the current boundary, including time,
     /// step total, Ready/Halted/Off status, queued input and held controls.
     /// Saving does not change guest state or make external records durable.
+    ///
+    /// Allowed errors: `Usage` for a terminal status, `Unsupported` for absent
+    /// saved state, `Storage` for host I/O, `Content` for detected changed backing.
+    /// All failures preserve machine state, queues, status and external records;
+    /// `out` may contain an incomplete document that must be discarded.
     fn save_state(&mut self, out: &mut dyn Write) -> Result<(), Error>;
 
     /// Replace the machine state with a compatible saved one. Success restores
@@ -228,17 +270,27 @@ pub trait Machine {
     /// On any failure the observable machine state, queues and external records
     /// are unchanged; consuming bytes from `state` is allowed. Implementations
     /// must validate/stage before applying rather than partially mutate.
+    ///
+    /// Allowed errors: `Usage` for a terminal status, `Unsupported` for absent
+    /// saved state, `Storage` for host I/O, `State` for a malformed or incompatible
+    /// document. Every failure preserves all observable state and external
+    /// records, but may consume the reader. Do not classify host I/O as State.
     fn load_state(&mut self, state: &mut dyn Read) -> Result<(), Error>;
 
     /// End the session cleanly: make everything written durable and close
     /// it as complete and enter [`Status::Finished`]. In Failed or Finished
     /// it returns `Usage` without work; a second successful finish is forbidden.
-    /// A failed `finish` leaves the status [`Status::Failed`]. Storage follows
+    /// A finalization I/O failure leaves the status [`Status::Failed`]. Storage follows
     /// [`crate::Record`], including destructive cuts and partial tails;
     /// replacement preserves old or new contents whole. Dropping a machine
     /// without `finish` performs no durability barrier and marks nothing
     /// complete. An ordinary recreate sees current storage, without rollback;
     /// an actual power failure may lose unsynchronized changes.
+    ///
+    /// Allowed errors: `Usage` for Failed/Finished (status unchanged), and
+    /// `Storage` or `StorageUncertain` for finalization I/O (sets Failed).
+    /// No Guest error: finishing does not execute the guest. Record durability
+    /// and uncertainty rules apply; failure does not promise rollback.
     fn finish(&mut self) -> Result<Finished, Error>;
 
     /// Move the core's messages since the last call to the end of `out`. A

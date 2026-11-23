@@ -7,6 +7,8 @@ use std::rc::Rc;
 
 /// A one-tick, one-retired-instruction machine for consumer conformance tests.
 /// It has one display, one removable slot, saved state and both reset kinds.
+/// Input ports are keyboard 0, relative pointer 1 (three buttons), absolute
+/// pointer 2 (one button) and pad 3 (A and Select).
 /// Each executed step changes its single pixel. Scripted stops occur after
 /// the next step; planted errors occur before it. No guest hardware is modeled.
 pub struct ScriptedMachine {
@@ -46,11 +48,24 @@ impl ScriptedMachine {
             description: MachineDescription::new(Rate::new(8_000, 1), "instruction")
                 .with_displays(vec![DisplayDescription::new(DisplayId(0), "Display")])
                 .with_audio(Some(AudioDescription::new(Rate::new(8_000, 1))))
-                .with_inputs(vec![InputPortDescription::new(
-                    PortId(0),
-                    InputKind::Keyboard,
-                    "Input",
-                )])
+                .with_inputs(vec![
+                    InputPortDescription::new(PortId(0), InputKind::Keyboard, "Keyboard"),
+                    InputPortDescription::new(
+                        PortId(1),
+                        InputKind::relative_pointer(3),
+                        "Relative pointer",
+                    ),
+                    InputPortDescription::new(
+                        PortId(2),
+                        InputKind::absolute_pointer(DisplayId(0), 1),
+                        "Absolute pointer",
+                    ),
+                    InputPortDescription::new(
+                        PortId(3),
+                        InputKind::pad(vec![PadControl::A, PadControl::Select]),
+                        "Pad",
+                    ),
+                ])
                 .with_slots(vec![SlotDescription::new(
                     SlotId(0),
                     SlotKind::Floppy,
@@ -299,6 +314,44 @@ impl Machine for ScriptedMachine {
     }
     fn input(&mut self, event: InputEvent) -> Result<(), Error> {
         self.interactive()?;
+        let valid = match &event {
+            InputEvent::ReleaseAll => true,
+            InputEvent::Key { port, .. }
+            | InputEvent::PointerMotion { port, .. }
+            | InputEvent::PointerButton { port, .. }
+            | InputEvent::Pad { port, .. }
+            | InputEvent::PointerPosition { port, .. } => {
+                self.description.inputs.iter().any(|input| {
+                    input.id == *port
+                        && match (&event, &input.kind) {
+                            (InputEvent::Key { .. }, InputKind::Keyboard)
+                            | (
+                                InputEvent::PointerMotion { .. },
+                                InputKind::RelativePointer { .. },
+                            )
+                            | (
+                                InputEvent::PointerPosition { .. },
+                                InputKind::AbsolutePointer { .. },
+                            ) => true,
+                            (
+                                InputEvent::PointerButton { button, .. },
+                                InputKind::RelativePointer { buttons }
+                                | InputKind::AbsolutePointer { buttons, .. },
+                            ) => button < buttons,
+                            (InputEvent::Pad { control, .. }, InputKind::Pad { controls }) => {
+                                controls.contains(control)
+                            }
+                            _ => false,
+                        }
+                })
+            }
+        };
+        if !valid {
+            return Err(Error::new(
+                ErrorKind::Usage,
+                "invalid input port or control",
+            ));
+        }
         self.pending.push(event);
         Ok(())
     }

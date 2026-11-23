@@ -2,7 +2,7 @@
 
 This is the consumer migration index for 0.4.0. Move every core and front end
 in a build together, using one exact release revision. The release's commit
-to pin remains `<commit of the release>` until the maintainer tags it.
+to pin remains `563f3089f2ad26a189636624faa4696b2bc79d07` until the maintainer tags it.
 
 - [API shapes, lifecycle, media and state](migration-0.4-shapes.md): factories,
   extensible patterns, Finished, fallible input, immediate media changes,

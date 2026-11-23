@@ -3,11 +3,11 @@
 A core and a front end name the crate the same way: by the git URL and the
 exact commit of a release tag. Contract 0.4 keeps exact git pins; registry
 SemVer requirements are planned for 1.0, not this release. The placeholder
-`<commit of the release>` below must be replaced after the maintainer tags
+`563f3089f2ad26a189636624faa4696b2bc79d07` below must be replaced after the maintainer tags
 0.4.0. See the [0.4 migration index](migration-0.4.md).
 
 ```toml
-unemu-core-api = { version = "0.4", git = "https://github.com/unemu-org/unemu-core-api", rev = "<commit of the release>" }
+unemu-core-api = { version = "0.4", git = "https://github.com/unemu-org/unemu-core-api", rev = "563f3089f2ad26a189636624faa4696b2bc79d07" }
 ```
 
 - An exact revision, never a branch and never a tag name: a tag can be
@@ -39,7 +39,7 @@ crate of this repository, is those objects over host files:
   by the same URL and revision as the contract:
 
   ```toml
-  unemu-core-files = { version = "0.4", git = "https://github.com/unemu-org/unemu-core-api", rev = "<commit of the release>" }
+  unemu-core-files = { version = "0.4", git = "https://github.com/unemu-org/unemu-core-api", rev = "563f3089f2ad26a189636624faa4696b2bc79d07" }
   ```
 
 - **Who never links it:** a core library. A core takes the objects the

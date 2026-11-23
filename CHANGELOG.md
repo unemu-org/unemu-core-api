@@ -7,7 +7,7 @@ or **added**. Every release names the commit a consumer pins
 
 ## 0.4.0 — 2026-11-23 — contract 0.4
 
-Commit to pin: `<commit of the release>`
+Commit to pin: `563f3089f2ad26a189636624faa4696b2bc79d07`
 
 Breaking 0.4 completes the contract review: terminal Finished status,
 immediate media changes and honest storage guarantees. 1.0 comes later,

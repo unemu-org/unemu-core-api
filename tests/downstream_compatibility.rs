@@ -10,7 +10,7 @@ use unemu_core_api::*;
 
 const DIGEST: [u8; 32] = [7; 32];
 const DESCRIPTION: CoreDescription = CoreDescription::new(
-    ContractVersion::new(0, 4),
+    ContractVersion::new(0, 5),
     "baseline",
     "Baseline core",
     "1.0.0",
@@ -543,4 +543,32 @@ fn validation_content_is_an_identity_set_instead_of_an_open_trace() {
         opened.iter().copied().collect()
     );
     machine.finish().unwrap();
+}
+
+#[test]
+fn baseline_core_defaults_offline_operations_to_unsupported_through_dyn_core() {
+    let core: &dyn Core = &BaselineCore;
+    assert!(core.description().platforms[0].export_formats.is_empty());
+    let config = ConfigDocument::new("unknown", b"bad");
+    let mut sink = unemu_core_api::test_support::MemoryExportSink::new();
+    sink.fail_next(unemu_core_api::test_support::ExportOperation::Create);
+    assert_eq!(
+        kind(core.describe_media("unknown", config)),
+        ErrorKind::Unsupported
+    );
+    assert_eq!(
+        kind(core.export_slots("unknown", config, "unknown")),
+        ErrorKind::Unsupported
+    );
+    assert_eq!(
+        kind(core.export(
+            "unknown",
+            config,
+            ExportRequest::new("unknown", &[]),
+            &mut sink
+        )),
+        ErrorKind::Unsupported
+    );
+    assert!(sink.outputs().is_empty());
+    assert_eq!(kind(sink.create("probe")), ErrorKind::Storage);
 }

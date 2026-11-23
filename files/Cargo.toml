@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 [package]
 name = "unemu-core-files"
-# Released with the contract it implements: 0.4.0 is CONTRACT 0.4.
-version = "0.4.0"
+# Released with the contract it implements: 0.5.0 is CONTRACT 0.5.
+version = "0.5.0"
 edition = "2021"
 rust-version = "1.99"
 license = "MIT OR Apache-2.0"
@@ -16,4 +16,4 @@ publish = false
 # Only the contract, from this repository; the standard library does the rest
 # (file locks, directory listing, rename).
 [dependencies]
-unemu-core-api = { version = "0.4.0", path = ".." }
+unemu-core-api = { version = "0.5.0", path = ".." }

@@ -6,6 +6,7 @@ use crate::{
     ContentKind, ContentReader, ContractVersion, Error, ErrorKind, Identified, Machine,
     OfferedContent, ResetKind, Storage, Validated,
 };
+use crate::{ExportFormat, ExportReport, ExportRequest, ExportSink, MediaDescription, SlotId};
 use std::fmt;
 use std::rc::Rc;
 
@@ -97,6 +98,104 @@ pub trait Core: Send + Sync {
             "this core does not validate configs",
         ))
     }
+
+    /// Describe every configured slot without creating a machine (since 0.5).
+    /// The same config gives the same ordered descriptions; ids are unique
+    /// and agree with the created machine's slots. Detail is display-only;
+    /// a front end never parses geometry or formats from it. A fixed medium
+    /// length is supplied as bytes, otherwise None.
+    ///
+    /// Like `validate`, this is config-only, with no I/O or state changes.
+    /// Config-only checks agree with `validate` and baseline `create`; success
+    /// cannot promise creation or export success. Only Config and Unsupported
+    /// are allowed: Config rejects the document; Unsupported means unavailable
+    /// operation/platform/config type or config-only unsupported feature.
+    /// Reject an absent operation before checking arguments. Default Unsupported;
+    /// a front end may probe this optional operation and fall back to slot labels
+    /// without offering geometry-dependent tools or guessing a byte length.
+    fn describe_media(
+        &self,
+        platform: &str,
+        config: ConfigDocument<'_>,
+    ) -> Result<Vec<MediaDescription>, Error> {
+        let _ = (platform, config);
+        Err(Error::new(
+            ErrorKind::Unsupported,
+            "this core does not describe offline media",
+        ))
+    }
+
+    /// Query a format's slots without creating a machine (since 0.5).
+    /// For Slot scope, returns every eligible slot; an export selects one.
+    /// For Machine scope, returns exactly the required set, which may be a
+    /// subset of `describe_media`. Ids are unique, configured and in canonical
+    /// output order. Requests may supply them in any order; export accepts
+    /// reordering and emits the same outputs. Empty means no eligible slots
+    /// for Slot scope, or a machine document requiring no media for Machine.
+    ///
+    /// Advertised formats support this query. Like `describe_media`, it is
+    /// config-only and deterministic, with no I/O or state/status changes.
+    /// Config-only checks agree with `validate` and baseline `create`.
+    /// Allowed errors: Unsupported for absent operation/platform/config type
+    /// or unsupported config/format capability; Config for a rejected document;
+    /// Usage for an unknown format id. Reject absent operations before checking
+    /// arguments. Default Unsupported; front ends leave a format unavailable
+    /// if its slot set cannot be queried, rather than guessing from all slots.
+    fn export_slots(
+        &self,
+        platform: &str,
+        config: ConfigDocument<'_>,
+        format_id: &str,
+    ) -> Result<Vec<SlotId>, Error> {
+        let _ = (platform, config, format_id);
+        Err(Error::new(
+            ErrorKind::Unsupported,
+            "this core does not describe export slots",
+        ))
+    }
+
+    /// Export current media offline, only through the supplied sink (since 0.5).
+    /// Advertised by `PlatformDescription::export_formats`; empty means absent.
+    /// A 0.4-style core inherits Unsupported. Front ends leave export controls
+    /// unavailable for absent formats and handle unknown scopes with a fallback.
+    ///
+    /// No machine is created, retained or changed; no virtual time advances and
+    /// no Machine status changes on any result. Inputs are read-only snapshots;
+    /// export always creates new outputs and never rewrites a base or its layers.
+    /// Identical platform/config/format and current slot bytes produce identical
+    /// output names, order, bytes, receipts and notes, regardless of request slot
+    /// order. No host clock, randomness or threads in the execution path.
+    /// Required/eligible slots are discoverable through `export_slots`.
+    /// Machine documents refer to slot outputs using exactly the relative names
+    /// passed to the sink, never a host path. Finish every output before success.
+    /// Report every setting the format cannot express in `ExportReport::notes`.
+    ///
+    /// Exhaustive errors: Unsupported for absent operation/platform/config type
+    /// or unsupported config/format capability; Config for rejected config;
+    /// Usage for unknown format id, unknown/duplicate/missing slots, wrong scope
+    /// cardinality, invalid output names or existing sink names; Content for
+    /// declared length != reader size or a fixed description length, or a reader's
+    /// detected changed bytes; Storage for reader/sink I/O, including finish.
+    /// A core's own out-of-bounds parsing reads must not escape as caller Usage.
+    /// No StorageUncertain: export outputs have no record recovery lifecycle.
+    ///
+    /// Reject absent operations before arguments, and perform config-only checks
+    /// as `validate` does. Validate request ids/cardinality/lengths before creating
+    /// outputs. A failure may leave partial outputs; the front end removes every
+    /// output it created. Never report incomplete export as success.
+    fn export(
+        &self,
+        platform: &str,
+        config: ConfigDocument<'_>,
+        request: ExportRequest<'_>,
+        sink: &mut dyn ExportSink,
+    ) -> Result<ExportReport, Error> {
+        let _ = (platform, config, request, sink);
+        Err(Error::new(
+            ErrorKind::Unsupported,
+            "this core does not export",
+        ))
+    }
 }
 
 /// A core, as data. A front end lists cores and enables controls from this
@@ -174,6 +273,10 @@ pub struct PlatformDescription {
     /// A platform that opens content lists at least one config type,
     /// because [`Core::identify`] answers in one.
     pub content: &'static [ContentKind],
+    /// Optional offline formats (since 0.5), empty by default. Ids are unique
+    /// within this platform and stable across releases. Every advertised format
+    /// works for its supported configurations through Core::export.
+    pub export_formats: &'static [ExportFormat],
 }
 
 impl PlatformDescription {
@@ -187,6 +290,7 @@ impl PlatformDescription {
             features: Features::NONE,
             options: &[],
             content: &[],
+            export_formats: &[],
         }
     }
 
@@ -208,6 +312,31 @@ impl PlatformDescription {
     /// The kinds of content a person can open to start a machine.
     pub const fn with_content(mut self, content: &'static [ContentKind]) -> Self {
         self.content = content;
+        self
+    }
+
+    /// Set offline formats, checking field rules and unique ids.
+    /// Panics on invalid formats or duplicate ids, including in const contexts.
+    pub const fn with_export_formats(mut self, formats: &'static [ExportFormat]) -> Self {
+        let mut index = 0;
+        while index < formats.len() {
+            assert!(formats[index].is_valid(), "invalid export format");
+            let mut other = 0;
+            while other < index {
+                let a = formats[index].id.as_bytes();
+                let b = formats[other].id.as_bytes();
+                let mut equal = a.len() == b.len();
+                let mut byte = 0;
+                while equal && byte < a.len() {
+                    equal = a[byte] == b[byte];
+                    byte += 1;
+                }
+                assert!(!equal, "duplicate export format id");
+                other += 1;
+            }
+            index += 1;
+        }
+        self.export_formats = formats;
         self
     }
 }

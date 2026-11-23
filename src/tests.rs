@@ -24,14 +24,15 @@ fn from_major_one_a_front_end_drives_every_minor_of_its_major() {
 }
 
 #[test]
-fn this_source_is_contract_zero_four_and_drives_itself() {
-    assert_eq!(CONTRACT, ContractVersion::new(0, 4));
+fn this_source_is_contract_zero_five_and_drives_itself() {
+    assert_eq!(CONTRACT, ContractVersion::new(0, 5));
     assert!(CONTRACT.drives(CONTRACT));
-    assert_eq!(CONTRACT.to_string(), "0.4");
+    assert_eq!(CONTRACT.to_string(), "0.5");
 }
 
 #[test]
 fn this_source_refuses_earlier_contract_minors() {
+    assert!(!CONTRACT.drives(ContractVersion::new(0, 4)));
     assert!(!CONTRACT.drives(ContractVersion::new(0, 3)));
     assert!(!CONTRACT.drives(ContractVersion::new(0, 2)));
     assert!(!CONTRACT.drives(ContractVersion::new(0, 1)));
@@ -282,7 +283,7 @@ static PLATFORMS: [PlatformDescription; 1] = [PlatformDescription::new("counter"
     .with_content(&TAPE_KINDS)];
 
 static DESCRIPTION: CoreDescription =
-    CoreDescription::new(ContractVersion::new(0, 4), "counter", "Counter", "0.0.2")
+    CoreDescription::new(ContractVersion::new(0, 5), "counter", "Counter", "0.0.2")
         .with_platforms(&PLATFORMS)
         .with_notices(&[Notice::new("nothing", "no third-party parts")]);
 
@@ -533,7 +534,7 @@ fn validate_refuses_a_broken_config_with_diagnostics() {
 struct BareCore;
 
 static BARE: CoreDescription =
-    CoreDescription::new(ContractVersion::new(0, 4), "bare", "Bare", "0.0.1");
+    CoreDescription::new(ContractVersion::new(0, 5), "bare", "Bare", "0.0.1");
 
 impl Core for BareCore {
     fn description(&self) -> &CoreDescription {

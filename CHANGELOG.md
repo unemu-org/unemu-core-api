@@ -5,6 +5,40 @@ or **added**. Every release names the commit a consumer pins
 ([`docs/embedding.md`](docs/embedding.md)); the version rules are in
 [`docs/versioning.md`](docs/versioning.md).
 
+## 0.5.0 — 2026-11-23 — contract 0.5
+
+Commit to pin: `<commit of the release>`
+
+Contract 0.5 adds offline media description and export through the core
+([decision](docs/decisions/0001-offline-media-and-export.md)): the front end
+no longer needs disk geometry or file formats. Every addition is optional
+and answers Unsupported by default; a 0.4 core only states 0.5. Consumers
+start at the [0.5 migration guide](docs/migration-0.5.md).
+
+- **breaking** Both packages are 0.5.0 and CONTRACT is 0.5; before 1.0 a
+  front end drives only cores that state its own minor, so every core
+  states 0.5.
+
+- **added** Optional config-only Core::describe_media returns each configured
+  SlotDescription, display-only detail and an optional fixed byte length.
+  Core::export streams current media readers through host-independent sinks;
+  Core::export_slots exposes eligible/required slots per format. All three
+  methods default to Unsupported, keeping 0.4-style implementations valid.
+- **added** PlatformDescription::export_formats defaults to empty. Const
+  ExportFormat constructors and its list builder check fields and unique ids;
+  Slot and Machine scopes keep format knowledge in the core.
+- **added** Export requests, streamed outputs, safe plain relative names with
+  no overwrite, sink-owned borrowed handles, closing finish, sink-provided
+  full SHA-256 receipts and explicit loss notes. Front ends verify reports
+  against their own created-output records and receipts.
+  Machine documents use sink names relatively. Exports are deterministic;
+  front ends remove created outputs on failure. The error matrix extends to
+  offline methods without changing Machine statuses.
+- **added** MemoryExportSink and ScriptedCore with slot/machine formats,
+  external compatibility and conformance tests, an accepted
+  [decision record](docs/decisions/0001-offline-media-and-export.md) and
+  [migration guide](docs/migration-0.5.md). No version bump or release pin yet.
+
 ## 0.4.0 — 2026-11-23 — contract 0.4
 
 Commit to pin: `563f3089f2ad26a189636624faa4696b2bc79d07`

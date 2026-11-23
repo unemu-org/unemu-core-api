@@ -53,6 +53,7 @@ mod content;
 mod control;
 mod core;
 mod error;
+mod export;
 mod input;
 mod machine;
 mod media;
@@ -70,13 +71,17 @@ pub use crate::core::{
     CreateRequest, Features, Notice, OptionDescription, PlatformDescription,
 };
 pub use crate::error::{Diagnostic, Error, ErrorKind, Message, MessageLevel};
+pub use crate::export::{
+    is_export_name, ExportFormat, ExportMedium, ExportOutput, ExportReport, ExportRequest,
+    ExportScope, ExportSink, ExportedOutput,
+};
 pub use crate::input::{
     pointer_pixel, InputEvent, InputKind, InputPortDescription, Key, KeyState, PadControl, PortId,
 };
 pub use crate::machine::{Machine, MachineDescription, Rate, RunLimit, Status, Stop, Ticks};
 pub use crate::media::{
-    MediaAction, MediumInfo, NewMedium, SlotDescription, SlotId, SlotKind, SlotState, WriteKind,
-    WriteTarget,
+    MediaAction, MediaDescription, MediumInfo, NewMedium, SlotDescription, SlotId, SlotKind,
+    SlotState, WriteKind, WriteTarget,
 };
 pub use crate::output::{
     AudioDescription, DisplayDescription, DisplayId, Frame, FrameArea, Outputs,
@@ -93,6 +98,8 @@ const _: () = {
     const fn assert_send<T: Send>() {}
     assert_send::<Identified>();
     assert_send::<Validated>();
+    assert_send::<MediaDescription>();
+    assert_send::<ExportReport>();
     assert_send::<ConfigDocumentBuf>();
     assert_send::<Error>();
     assert_send::<Message>();

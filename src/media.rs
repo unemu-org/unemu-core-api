@@ -231,3 +231,35 @@ impl<'a> WriteTarget<'a> {
         Self::Kept { record }
     }
 }
+
+/// One configured slot described offline, without opening content (since 0.5).
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MediaDescription {
+    pub slot: SlotDescription,
+    /// Display-only text in the core's vocabulary. Front ends show it verbatim
+    /// and never parse it for geometry, lengths or format decisions.
+    pub detail: String,
+    /// Medium byte length when fixed by the config, otherwise unknown. Never
+    /// derive a length from detail; unknown is distinct from an empty medium.
+    pub size: Option<u64>,
+}
+
+impl MediaDescription {
+    /// A slot with empty detail and unknown medium length.
+    pub fn new(slot: SlotDescription) -> Self {
+        Self {
+            slot,
+            detail: String::new(),
+            size: None,
+        }
+    }
+    pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = detail.into();
+        self
+    }
+    pub const fn with_size(mut self, size: Option<u64>) -> Self {
+        self.size = size;
+        self
+    }
+}

@@ -546,3 +546,6 @@ impl ContentReader for MemoryContent {
 
 mod machine;
 pub use machine::ScriptedMachine;
+
+mod export;
+pub use export::{ExportOperation, MemoryExportSink, ScriptedCore};

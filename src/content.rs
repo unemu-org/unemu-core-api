@@ -82,7 +82,7 @@ impl ContentKind {
     }
 }
 
-const fn is_kind_id(id: &str) -> bool {
+pub(crate) const fn is_kind_id(id: &str) -> bool {
     let bytes = id.as_bytes();
     if bytes.is_empty() || bytes.len() > 64 || bytes[0] == b'-' {
         return false;
@@ -98,7 +98,7 @@ const fn is_kind_id(id: &str) -> bool {
     true
 }
 
-const fn is_extension(extension: &str) -> bool {
+pub(crate) const fn is_extension(extension: &str) -> bool {
     let bytes = extension.as_bytes();
     if bytes.is_empty() || bytes.len() > 16 {
         return false;

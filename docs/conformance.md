@@ -3,12 +3,12 @@
 The documentation comments say what each call must do. This list is what
 they cannot say about a core as a whole. It is the checklist a new core,
 and every change to a core, is reviewed against. It is the list of
-contract 0.4.
+contract 0.4, with additive offline operations for 0.5.
 
 1. **The dependency.** The crate by the exact revision of a release tag
    ([`embedding.md`](embedding.md)), never a path, a branch or a copy; a
    gitignored patch for local work. `CoreDescription::implements` is a
-   literal, such as `ContractVersion::new(0, 4)`.
+   literal, such as `ContractVersion::new(0, 5)`.
 2. **The description.** A core id, its platforms, their config types and
    options, its notices. A platform that a person can start from a file
    lists its `ContentKind`s with their extensions, and at least one config
@@ -207,8 +207,8 @@ host I/O, State rejects a saved-state document, and Guest reports emulation
 failure. StorageUncertain is an uncertain write, never flattened to Storage
 or a warning. Method-specific reset rules retain the existing Guest exception.
 
-The allowed kinds below are exhaustive for 0.4. An implementation translates
-its internal errors at the adapter; a core's own invalid parsing read must not
+The allowed kinds below are exhaustive for 0.4 plus the optional 0.5 offline
+operations. An implementation translates its internal errors at the adapter; a core's own invalid parsing read must not
 escape as caller Usage. Apply status rejections first, then absent-operation
 Unsupported, then argument checks, as in the call/status matrix. Halted/Off run
 short-circuits remain as specified there. No call below advances virtual time
@@ -220,6 +220,12 @@ state, even for finish; finalization I/O failure instead sets Failed.
 | `Core::create` | Config, Usage, Unsupported, Content, Storage, StorageUncertain | No running machine; acquired records released; no half-written session mistaken as complete. Record recovery applies; no storage rollback promised. |
 | `Core::identify` | Unsupported, Content, Storage | No retained machine, content or state; a mismatched offered receipt is Content. Foreign bytes return None; recognised unmodelled/damaged images use Unsupported. |
 | `Core::validate` | Config, Unsupported | Config-only check; no state changes or I/O. Unsupported covers unavailable platform/type or config-only unsupported feature. |
+| `Core::describe_media` | Config, Unsupported | Config-only; no I/O, machine creation, state or status changes. Same config-only checks as validate and baseline create. |
+| `Core::export_slots` | Config, Usage, Unsupported | Config-only; no I/O, machine creation, state or status changes. Usage for unknown format id; config checks as validate. |
+| `Core::export` | Config, Usage, Unsupported, Content, Storage | No input, machine, status or time changes. May leave partial outputs; front end removes every output it created, never pre-existing outputs. |
+| `ExportSink::create` | Usage, Storage | Invalid or existing names are Usage with no overwrite. I/O may leave a partial newly created output to clean up. |
+| `ExportOutput::write` | Storage | May leave a partial append; invalidate and clean up the whole export. |
+| `ExportOutput::finish` | Storage | Output closed on every result; later writes/finishes are Storage; failed output must be cleaned up. |
 | `Machine::run` | Usage, Unsupported, Guest, Content, Storage, StorageUncertain | Usage/Unsupported before execution preserve state/input. Execution errors set Failed; halt-time Storage/StorageUncertain may leave Halted. |
 | `Machine::frame` | Usage, Unsupported, Content, Storage | Status, guest state and last completed picture unchanged. Invalid display id is Usage when picture output exists; no initial picture may also be Usage. |
 | `Machine::drain_audio` | Unsupported, Content, Storage | Status and guest state unchanged. Partial append to out and consumed pending audio are possible; discard the failed append. |
@@ -277,3 +283,84 @@ Construction tests cover default fields and extensible patterns. Feature-gated
 public test-support helpers are themselves part of the API from 1.0. These are
 source checks in one unified Cargo build, not a stable binary ABI or a claim
 that separately released consumer adapters have been migrated and tested.
+
+
+## Offline media and export (0.5)
+
+All new Core methods are optional and default to Unsupported before checking
+arguments. PlatformDescription::export_formats defaults to empty (absent).
+Older front ends ignore this addition; newer front ends handle unknown scopes
+by leaving the format unavailable. describe_media may be probed and fall back
+to baseline labels without geometry tools. No existing Core or Machine method
+gains mandatory work from these additions.
+
+1. describe_media performs only config checks, with Config/Unsupported as
+   validate does. It agrees with validate and baseline create on those checks;
+   success cannot promise creation/export success. It describes every configured
+   slot once, with the ids and slot data the created machine reports, in a
+   deterministic order. Detail defaults to empty, is display-only and is never
+   parsed by front ends. size defaults to None; Some(n) is the medium's length
+   in bytes when config fixes it. Unknown is distinct from an empty medium.
+2. Export format ids are stable, core-defined and unique within a platform;
+   fields follow ExportFormat's documented syntax. The const constructor checks
+   fields and the platform list builder rejects duplicate ids. Every advertised
+   format works for supported configs. Unsupported covers an absent operation,
+   platform, config type or unsupported config/format capability; an unknown
+   format id in a supported operation is Usage. Config rejects a document.
+3. A request contains exactly one known slot for Slot scope, or every slot
+   exported by the format exactly once for Machine scope. The core defines
+   that set through config-only Core::export_slots, which returns unique
+   configured ids in canonical order. For Slot scope it lists eligible slots;
+   for Machine scope it lists the exact required set, possibly a strict subset
+   of describe_media. Each advertised format supports the query; an unavailable
+   query disables the format in the front end. Query errors are Config,
+   Unsupported or Usage (unknown format). Reordered requests are accepted and
+   produce the same canonical output order. Unknown, ineligible, missing and
+   duplicate slots or wrong scope cardinality
+   are Usage. Before creating outputs, check ids/cardinality and require each
+   declared length to equal its reader size and any config-fixed length;
+   mismatch is Content. Readers expose stable CURRENT bytes assembled by the
+   front end through one base/layers/journal interface; the core only reads.
+   Reader Content/Storage errors propagate; the core's own invalid parsing read
+   must not leak Usage. No failed read buffer may be emitted as valid output.
+4. is_export_name validates plain relative logical names: 1–64 ASCII bytes of
+   a-z, 0-9, hyphen and dot, starting/ending with a letter or digit, no `..`
+   anywhere. No separators, absolute/drive paths, whitespace or Unicode.
+   Sink create validates names and reserves them without overwrite, even for
+   unfinished outputs. Invalid/existing names are Usage. All valid names work;
+   backend-special names are mapped internally without changing logical names.
+5. The sink owns outputs and backend resources, lending mutable output
+   references tied to its borrow. Retaining a handle beyond Core::export cannot
+   compile. After success or failure the front end can close every output,
+   including unfinished ones, before cleanup. Finish closes on either result;
+   later writes and finishes return Storage without changing bytes or receipts.
+   Outputs take streamed writes, with no silent short writes. Every created
+   output is finished before success and appears exactly once in the report,
+   including machine documents. Finish returns the exact logical name, length
+   and full SHA-256 of all output bytes: a required sink/front-end hashing hook,
+   not an optional or sampled digest. This keeps the contract dependency-free.
+   Receipts are sink-computed but core-editable. Before accepting success, front
+   ends compare report names, counts, completion status, lengths and digests
+   against their own record of created outputs and sink receipts. Missing,
+   extra, duplicate, unfinished or altered entries invalidate success and require
+   cleanup as for failure; the report alone is not evidence of completeness.
+   Machine documents refer to slot outputs by exactly the names created by the
+   sink, relatively, never host paths. Notes name every setting the format
+   cannot express; front ends show them instead of silently dropping settings.
+6. The same platform/config/format/current slot bytes produce identical output
+   names, order, bytes, receipts and notes, independent of request slot order.
+   No wall clock, randomness or threads. Inputs, bases, layers and journals
+   stay read-only. Large bases retain full SHA-256 verification; exporting or
+   committing makes a new base, never rewrites an old base in place.
+7. Sink I/O failures (create, write, finish) and reader I/O are Storage. Export
+   never returns StorageUncertain: these are new outputs, not recoverable
+   records. Failure returns an error, never a partial success report; outputs
+   may be incomplete and front ends remove every output created by the attempt,
+   including failed creations, without removing pre-existing outputs. Dropping
+   an output is not rollback. Successful finish accepts all writes; host
+   durability policy belongs to the front end. Offline calls never change a
+   running machine's status or virtual time, on either success or failure.
+
+Consumer steps and the accepted rationale are in
+[migration-0.5.md](migration-0.5.md) and the
+[decision record](decisions/0001-offline-media-and-export.md).

@@ -7,7 +7,7 @@ or **added**. Every release names the commit a consumer pins
 
 ## 0.5.0 — 2026-11-23 — contract 0.5
 
-Commit to pin: `<commit of the release>`
+Commit to pin: `316dd2a1f429cc3ef37a2bed203e89b2160079ff`
 
 Contract 0.5 adds offline media description and export through the core
 ([decision](docs/decisions/0001-offline-media-and-export.md)): the front end

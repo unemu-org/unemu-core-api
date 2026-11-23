@@ -26,7 +26,8 @@ pub struct SlotDescription {
     /// The slot's name for people, in the platform's words: `A:`, `C:`,
     /// `Cartridge`.
     pub label: String,
-    /// Whether the catalogue and the inserted medium can change at all.
+    /// Whether the inserted medium can change. Catalogue extension also
+    /// requires [`crate::Features::media_additions`].
     pub removable: bool,
     /// Format ids of the media the slot takes, in the vocabulary of the
     /// platform's media formats. The front end offers only these.
@@ -199,8 +200,9 @@ pub enum WriteTarget<'a> {
     ///
     /// [`crate::Machine::add_medium`] fails with
     /// [`crate::ErrorKind::Usage`] for a name that breaks those rules. The
-    /// core opens the record at the latest when the medium is inserted; a
-    /// failure to open it fails the next run ([`crate::Machine::run`]).
+    /// core opens the record at the latest during insertion; the call that
+    /// opens it reports failure immediately, never a later run.
+    #[non_exhaustive]
     Kept {
         record: &'a str,
     },
@@ -219,5 +221,13 @@ pub enum MediaAction {
 }
 
 /// A slot of a machine, by the number its description gives it.
+/// Deliberately closed scalar representation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SlotId(pub u8);
+
+impl<'a> WriteTarget<'a> {
+    /// Keep writes in a record; `Machine::add_medium` validates its name.
+    pub const fn kept(record: &'a str) -> Self {
+        Self::Kept { record }
+    }
+}

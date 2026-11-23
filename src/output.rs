@@ -20,7 +20,8 @@ pub struct Frame<'a> {
     /// height, such as 4:3. The front end scales to it.
     pub aspect: (u32, u32),
     /// Changes whenever the pixels changed, so an unchanged picture is not
-    /// uploaded again.
+    /// uploaded again. Geometry, aspect and visible area can change with the
+    /// same serial; front ends must read them independently on every frame.
     pub serial: u64,
     /// The part of the picture that a display of the machine's time
     /// showed for certain; the rest is overscan, which may hold garbage.
@@ -36,7 +37,12 @@ pub struct Frame<'a> {
 }
 
 impl<'a> Frame<'a> {
-    /// A picture whose whole area is visible.
+    /// A picture whose whole area is visible. Width, height and both aspect
+    /// components must be positive; pixels must contain exactly width × height
+    /// elements. These requirements also apply after public-field mutation.
+    ///
+    /// # Panics
+    /// Panics for invalid dimensions, aspect or pixel count.
     pub fn new(
         width: u32,
         height: u32,
@@ -44,6 +50,8 @@ impl<'a> Frame<'a> {
         aspect: (u32, u32),
         serial: u64,
     ) -> Self {
+        assert!(width != 0 && height != 0 && aspect.0 != 0 && aspect.1 != 0);
+        assert_eq!(u64::from(width) * u64::from(height), pixels.len() as u64);
         Self {
             width,
             height,
@@ -90,7 +98,10 @@ impl<'a> Frame<'a> {
 }
 
 /// A rectangle of a picture, in its pixels: `x` columns from the left edge,
-/// `y` rows from the top edge.
+/// `y` rows from the top edge. Empty rectangles are representable, but are
+/// never valid visible areas: `is_within` rejects them and `with_visible`
+/// falls back to the whole picture when the intersection is empty.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FrameArea {
     /// The first column, counted from the left edge.
@@ -104,11 +115,23 @@ pub struct FrameArea {
 }
 
 impl FrameArea {
+    /// A rectangle, including an empty one; validate before cropping.
+    pub const fn new(x: u32, y: u32, width: u32, height: u32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
     /// Whether the area lies within a picture of `width` × `height` pixels.
     /// A front end checks a [`Frame::visible`] it did not build before it
     /// crops by it.
     pub const fn is_within(self, width: u32, height: u32) -> bool {
-        (self.x as u64) + (self.width as u64) <= width as u64
+        self.width != 0
+            && self.height != 0
+            && (self.x as u64) + (self.width as u64) <= width as u64
             && (self.y as u64) + (self.height as u64) <= height as u64
     }
 }
@@ -199,5 +222,6 @@ impl Outputs {
 }
 
 /// A display of a machine, by the number its description gives it.
+/// Deliberately closed scalar representation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DisplayId(pub u8);

@@ -10,15 +10,13 @@ use std::path::{Path, PathBuf};
 use unemu_core_api::{Error, ErrorKind};
 
 /// A failed opening/locking stage, preserved separately from the host error.
-/// `stage` is one of `resolve path`, `lock`, `open`, `metadata`, `verify path`,
-/// `cleanup`, `directory sync`. Contention and invalid record paths are Usage;
-/// other host failures are Storage. Record and replacement errors carry their
-/// stage in the message.
+/// Contention and invalid record paths are Usage; other host failures are
+/// Storage. Record and replacement errors carry their stage in the message.
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct FileError {
     /// The operation that failed.
-    pub stage: &'static str,
+    pub stage: FileStage,
     /// The host's original error, including its error kind and OS code.
     pub source: io::Error,
 }
@@ -35,7 +33,8 @@ impl std::error::Error for FileError {
 impl From<FileError> for Error {
     fn from(error: FileError) -> Self {
         let kind = if error.source.kind() == io::ErrorKind::WouldBlock
-            || (error.stage == "resolve path" && error.source.kind() == io::ErrorKind::InvalidInput)
+            || (error.stage == FileStage::ResolvePath
+                && error.source.kind() == io::ErrorKind::InvalidInput)
         {
             ErrorKind::Usage
         } else {
@@ -44,8 +43,42 @@ impl From<FileError> for Error {
         Self::new(kind, error.to_string())
     }
 }
-pub(crate) fn stage(stage: &'static str, source: io::Error) -> FileError {
-    FileError { stage, source }
+/// The operation that failed while opening a path record or taking its lock.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FileStage {
+    ResolvePath,
+    Lock,
+    Open,
+    Metadata,
+    VerifyPath,
+    Cleanup,
+    DirectorySync,
+}
+
+impl std::fmt::Display for FileStage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::ResolvePath => "resolve path",
+            Self::Lock => "lock",
+            Self::Open => "open",
+            Self::Metadata => "metadata",
+            Self::VerifyPath => "verify path",
+            Self::Cleanup => "cleanup",
+            Self::DirectorySync => "directory sync",
+        })
+    }
+}
+
+impl FileError {
+    /// Preserve a typed opening stage and the original host error.
+    pub fn new(stage: FileStage, source: io::Error) -> Self {
+        Self { stage, source }
+    }
+}
+
+pub(crate) fn stage(stage: FileStage, source: io::Error) -> FileError {
+    FileError::new(stage, source)
 }
 
 /// A lock on the canonical record's stable `FILE.lock` sidecar. The file is
@@ -71,7 +104,7 @@ impl PathLock {
     }
     /// The same protocol with injectable namespace and locking operations.
     pub fn acquire(fs: &dyn Filesystem, path: &Path, shared: bool) -> Result<Self, FileError> {
-        let path = resolve(fs, path).map_err(|e| stage("resolve path", e))?;
+        let path = resolve(fs, path).map_err(|e| stage(crate::FileStage::ResolvePath, e))?;
         let sidecar = suffix(&path, ".lock");
         let guard = match fs.lock(&sidecar, shared) {
             Ok(guard) => Some(guard),
@@ -85,7 +118,7 @@ impl PathLock {
             {
                 None
             }
-            Err(error) => return Err(stage("lock", error)),
+            Err(error) => return Err(stage(crate::FileStage::Lock, error)),
         };
         Ok(Self {
             path,

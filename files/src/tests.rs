@@ -995,12 +995,12 @@ fn path_creation_failures_preserve_absence_or_poison_after_publication() {
 #[test]
 fn path_open_failures_preserve_the_exact_stage_and_release_the_lock() {
     for (step, stage) in [
-        ("canonicalize", "resolve path"),
-        ("lock", "lock"),
-        ("open", "open"),
-        ("record metadata", "metadata"),
-        ("entries", "cleanup"),
-        ("directory sync", "directory sync"),
+        ("canonicalize", crate::FileStage::ResolvePath),
+        ("lock", crate::FileStage::Lock),
+        ("open", crate::FileStage::Open),
+        ("record metadata", crate::FileStage::Metadata),
+        ("entries", crate::FileStage::Cleanup),
+        ("directory sync", crate::FileStage::DirectorySync),
     ] {
         let dir = TempDir::new();
         let path = dir.path().join("record");
@@ -1159,7 +1159,7 @@ fn inspection_fallback_requires_an_absent_sidecar_and_never_grants_writes() {
             .err()
             .unwrap()
             .stage,
-        "lock"
+        crate::FileStage::Lock
     );
 }
 
@@ -1189,7 +1189,7 @@ fn a_preacquired_path_lock_transfers_to_the_record() {
         .err()
         .unwrap()
         .stage,
-        "lock"
+        crate::FileStage::Lock
     );
     assert_eq!(
         kind(crate::FileRecord::open(&path, b"header", None)),
@@ -1246,7 +1246,7 @@ fn path_cleanup_preserves_protected_aliases_links_special_files_and_foreign_pref
             .err()
             .unwrap()
             .stage,
-        "metadata"
+        crate::FileStage::Metadata
     );
 }
 
@@ -1282,7 +1282,7 @@ fn path_resolution_rejects_reserved_and_dangling_links_and_unifies_parent_aliase
             .err()
             .unwrap()
             .stage,
-        "resolve path"
+        crate::FileStage::ResolvePath
     );
     for name in ["record.create-0.tmp", "record.retain-9.tmp"] {
         assert_eq!(
@@ -1290,7 +1290,7 @@ fn path_resolution_rejects_reserved_and_dangling_links_and_unifies_parent_aliase
                 .err()
                 .unwrap()
                 .stage,
-            "resolve path"
+            crate::FileStage::ResolvePath
         );
     }
     symlink(dir.path(), dir.path().join("alias")).unwrap();
@@ -1418,11 +1418,11 @@ fn inspection_never_bypasses_a_dangling_sidecar() {
             .err()
             .unwrap()
             .stage,
-        "lock"
+        crate::FileStage::Lock
     );
     assert_eq!(
         crate::FileRecord::inspect(path).err().unwrap().stage,
-        "lock"
+        crate::FileStage::Lock
     );
 }
 
@@ -1481,7 +1481,7 @@ fn cleanup_metadata_open_read_and_unlink_failures_are_injectable() {
             crate::FileRecord::open_with(Rc::new(CandidateFs(fs)), &path, None, b"header", None);
         assert_eq!(result.is_err(), fails_open, "{step}");
         if let Err(error) = result {
-            assert_eq!(error.stage, "cleanup");
+            assert_eq!(error.stage, crate::FileStage::Cleanup);
         }
         assert!(candidate.exists(), "{step}");
     }
@@ -1568,7 +1568,7 @@ fn inspection_fallback_accepts_only_permission_or_read_only_errors() {
         let failure = crate::PathLock::acquire(&FailedLock(error), &path, true)
             .err()
             .unwrap();
-        assert_eq!(failure.stage, "lock");
+        assert_eq!(failure.stage, crate::FileStage::Lock);
         assert_eq!(failure.source.kind(), error);
     }
 }
@@ -1599,7 +1599,7 @@ fn post_open_canonical_verification_cannot_be_skipped() {
     )
     .err()
     .unwrap();
-    assert_eq!(error.stage, "verify path");
+    assert_eq!(error.stage, crate::FileStage::VerifyPath);
     crate::FileRecord::open(path, b"header", None).expect("failed verification released lock");
 }
 
@@ -1816,5 +1816,46 @@ fn file_storage_replacements_use_the_creation_umask() {
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o644
         );
+    }
+}
+
+#[test]
+fn typed_file_stages_preserve_display_source_and_error_classification() {
+    use crate::{FileError, FileStage};
+    for (stage, text) in [
+        (FileStage::ResolvePath, "resolve path"),
+        (FileStage::Lock, "lock"),
+        (FileStage::Open, "open"),
+        (FileStage::Metadata, "metadata"),
+        (FileStage::VerifyPath, "verify path"),
+        (FileStage::Cleanup, "cleanup"),
+        (FileStage::DirectorySync, "directory sync"),
+    ] {
+        let error = FileError::new(stage, std::io::Error::from_raw_os_error(13));
+        assert_eq!(error.stage, stage);
+        assert_eq!(stage.to_string(), text);
+        assert_eq!(error.source.raw_os_error(), Some(13));
+        assert!(std::error::Error::source(&error).is_some());
+        assert_eq!(unemu_core_api::Error::from(error).kind, ErrorKind::Storage);
+    }
+    for (stage, host_kind, expected) in [
+        (
+            FileStage::ResolvePath,
+            std::io::ErrorKind::InvalidInput,
+            ErrorKind::Usage,
+        ),
+        (
+            FileStage::Lock,
+            std::io::ErrorKind::WouldBlock,
+            ErrorKind::Usage,
+        ),
+        (
+            FileStage::Open,
+            std::io::ErrorKind::InvalidInput,
+            ErrorKind::Storage,
+        ),
+    ] {
+        let error = FileError::new(stage, std::io::Error::new(host_kind, "host failure"));
+        assert_eq!(unemu_core_api::Error::from(error).kind, expected);
     }
 }

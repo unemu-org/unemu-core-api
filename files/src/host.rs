@@ -184,7 +184,16 @@ pub trait Filesystem {
 }
 
 /// The standard library implementation of every host operation.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct HostFilesystem;
+
+impl HostFilesystem {
+    /// The standard host filesystem implementation.
+    pub const fn new() -> Self {
+        Self
+    }
+}
 impl Filesystem for HostFilesystem {}
 
 struct HostLock(File);

@@ -27,9 +27,13 @@
 //!   hand, so nothing here forces a version of another crate on a core.
 //! - Object-safe traits without generics: a front end holds `&dyn Core` and
 //!   `Box<dyn Machine>`.
-//! - Additive: every struct and enum is `#[non_exhaustive]`; a struct a core
-//!   builds has a `new` with its required fields and `with_…` setters. A minor
-//!   version only adds fields, variants and trait methods with a default body.
+//! - Extensible public data structs, enums and struct-like variants are
+//!   `#[non_exhaustive]`, with constructors or factories. Opaque structs with
+//!   private fields can grow privately. Unit and tuple enum variants have
+//!   fixed payloads; growth uses a new variant. The deliberately closed scalar types
+//!   are `Ticks(u64)`, `Key(u16)`, `PortId(u8)`, `DisplayId(u8)` and `SlotId(u8)`.
+//!   From 1.0 a minor only adds compatible fields, variants and default methods;
+//!   before 1.0 every minor may break.
 //! - No platform words: no port, interrupt line, scan code, disk geometry,
 //!   cartridge mapper or firmware catalogue appears here.
 //! - No host clock, no randomness, no threads: time is the core's own, in

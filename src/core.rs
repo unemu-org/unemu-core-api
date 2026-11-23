@@ -194,8 +194,12 @@ pub struct Features {
     pub resets: &'static [ResetKind],
     /// Whether state can be saved and loaded.
     pub saved_state: bool,
-    /// Whether removable media can change while the machine runs.
+    /// Whether existing catalogue entries can be selected or ejected.
+    /// Does not promise [`crate::Machine::add_medium`].
     pub media_changes: bool,
+    /// Whether [`crate::Machine::add_medium`] can extend a removable slot's
+    /// catalogue. Independent of selection via `media_changes`.
+    pub media_additions: bool,
     /// Whether a run can stop when a display finishes a frame
     /// ([`crate::RunLimit::stop_on_frame`]).
     pub frame_stops: bool,
@@ -207,6 +211,7 @@ impl Features {
         resets: &[],
         saved_state: false,
         media_changes: false,
+        media_additions: false,
         frame_stops: false,
     };
 
@@ -222,6 +227,11 @@ impl Features {
 
     pub const fn with_media_changes(mut self, media_changes: bool) -> Self {
         self.media_changes = media_changes;
+        self
+    }
+
+    pub const fn with_media_additions(mut self, media_additions: bool) -> Self {
+        self.media_additions = media_additions;
         self
     }
 

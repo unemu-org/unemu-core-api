@@ -5,6 +5,62 @@ or **added**. Every release names the commit a consumer pins
 ([`docs/embedding.md`](docs/embedding.md)); the version rules are in
 [`docs/versioning.md`](docs/versioning.md).
 
+## Unreleased (0.4)
+
+- **breaking** Successful `Machine::finish` now enters terminal
+  `Status::Finished`. Cores reject execution, reset, media changes, input
+  and state I/O in Finished and Failed with Usage, including repeated finish.
+  `Machine::input` returns `Result<(), Error>`; front ends must handle it.
+  Inspection and drains remain available; terminal `set_outputs` is ignored.
+- **breaking** The Machine call/status matrix is explicit in its trait docs
+  and `docs/conformance.md`: absolute limits, unbounded runs until an event,
+  stop priority, exhaustion, reset counters/queues and Off/Halted behavior.
+  Both reset kinds preserve counters and clear queued input and held controls
+  (absolute pointer positions remain). Runs need no limit; front ends enforce
+  their own budgets. Reject unavailable frame stops before consuming input.
+  Halted/Off runs return immediately, even for unbounded requests or unsupported
+  frame stops. Matrix status rejections (including Off) precede absent-capability
+  Unsupported, which precedes argument Usage.
+- **breaking** Media changes complete before returning; opening errors belong
+  to the media call. Ordinary failures preserve insertion and catalogue;
+  StorageUncertain leaves Failed. Execution content/record failures surface from
+  run and normally set Failed, with the documented halt-time durability exception;
+  failures of other calls follow their method-specific rules. Compatible aliases
+  with the same base identity, format and kept-record name reuse the held record.
+  `Features::media_changes` promises selection only. Cores and front ends
+  advertise/check `media_additions` separately for
+  catalogue extension; selection-only cores need not implement `add_medium`.
+- **breaking** ContractVersion, Rate, FrameArea and the struct-like variants
+  of InputEvent, InputKind and WriteTarget::Kept are non-exhaustive. Consumers
+  use constructors/factories and add `..` to field patterns. HostFilesystem
+  is non-exhaustive; use `new()` or `default()`. The scalar wrappers Ticks,
+  Key, PortId, DisplayId and SlotId deliberately retain their closed widths.
+- **breaking** Rate::new rejects zero denominators (always invalid), and
+  MachineDescription::new rejects a zero machine clock (always invalid).
+  Frame::new validates positive geometry/aspect and exact pixel count;
+  description list builders reject duplicate ids. Empty visible areas are
+  invalid; with_visible falls back to the whole picture for empty intersections.
+  A pixel serial does not cover geometry, aspect or visible-area changes:
+  front ends read that metadata every time. Before the first picture they
+  handle either Usage or an initial blank frame.
+- **breaking** Saved-state identity covers effective configuration, catalogue,
+  base media and mutable data dependencies. Mutable data is captured or its
+  generation is in the token. Failed loads preserve all observable state,
+  queues and records; successful loads restore counters, status and input,
+  discard pending audio and never rewind or commit external records.
+- **breaking** FileError::stage is the non-exhaustive FileStage enum rather
+  than a string. Match its variants with a wildcard; Display retains the
+  existing diagnostic text and the original host error remains available.
+- **added** Const FrameArea::new, checked Rate::checked_new and Rate::is_clock,
+  const InputEvent/InputKind factories (including pads with empty vectors),
+  const WriteTarget::kept, FileError::new and HostFilesystem::new/Default. RunLimit::at_steps is the clearer alias for
+  steps(n), which continues to mean an absolute total, not n more steps.
+- **added** The test-support ScriptedMachine models the lifecycle, immediate
+  media calls, planted failures, output metadata and atomic saved-state loads
+  for core/front-end conformance tests. Downstream integration tests construct
+  public data through its supported factories. The source migration list is
+  in `docs/migration-0.4-shapes.md`.
+
 ## 0.3.1 — 2026-11-21 — contract 0.3
 
 Commit to pin: `afba6e6b217946eb57b9556e79a30bbe53c90fb4` (tag `v0.3.1`)
@@ -64,7 +120,8 @@ the contract names no file system or path type.
   (`KEPT_RECORD_PREFIX`, `is_kept_record_name`); a core's own records never
   start with it. `add_medium` fails with `Usage` for a name outside the
   rules; the core opens the record at the latest when the medium is
-  inserted, and a failure to open it fails the next run.
+  inserted. From 0.4, the opening call reports failure immediately (see
+  Unreleased above).
 - **added** `Storage`, `Record` and `Replacement`: records a machine holds
   exclusively, appended to, cut and synchronised, and replaced whole in one
   step (`Record::replace`, `Replacement::commit`). `is_record_name` states

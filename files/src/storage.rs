@@ -979,12 +979,13 @@ impl FileRecord {
         initial: &[u8],
         protected: Option<&Metadata>,
     ) -> Result<Self, FileError> {
-        let resolved = path::resolve(fs.as_ref(), path).map_err(|e| stage("resolve path", e))?;
+        let resolved = path::resolve(fs.as_ref(), path)
+            .map_err(|e| stage(crate::FileStage::ResolvePath, e))?;
         let lock = match lock {
             Some(lock) if lock.path == resolved => lock,
             Some(_) => {
                 return Err(stage(
-                    "lock",
+                    crate::FileStage::Lock,
                     io::Error::new(io::ErrorKind::InvalidInput, "lock names another path"),
                 ))
             }
@@ -994,18 +995,18 @@ impl FileRecord {
         let data = match fs.open(&resolved, !read_only) {
             Ok(data) => Some(data),
             Err(error) if !read_only && error.kind() == io::ErrorKind::NotFound => None,
-            Err(error) => return Err(stage("open", error)),
+            Err(error) => return Err(stage(crate::FileStage::Open, error)),
         };
         let metadata = data
             .as_ref()
             .map(|file| file.metadata())
             .transpose()
-            .map_err(|e| stage("metadata", e))?;
+            .map_err(|e| stage(crate::FileStage::Metadata, e))?;
         if !read_only {
             if let Some(_protected) = protected {
                 #[cfg(not(unix))]
                 return Err(stage(
-                    "metadata",
+                    crate::FileStage::Metadata,
                     io::Error::new(
                         io::ErrorKind::Unsupported,
                         "protected identity is unavailable on this host",
@@ -1017,7 +1018,7 @@ impl FileRecord {
                     .is_some_and(|meta| same_file(meta, _protected))
                 {
                     return Err(stage(
-                        "metadata",
+                        crate::FileStage::Metadata,
                         io::Error::new(
                             io::ErrorKind::InvalidInput,
                             "record aliases the protected file",
@@ -1027,12 +1028,13 @@ impl FileRecord {
             }
         }
         if data.is_some() {
-            path::verify(fs.as_ref(), &resolved).map_err(|e| stage("verify path", e))?;
+            path::verify(fs.as_ref(), &resolved)
+                .map_err(|e| stage(crate::FileStage::VerifyPath, e))?;
             if !read_only {
                 path::cleanup(fs.as_ref(), &resolved, initial, protected)
-                    .map_err(|e| stage("cleanup", e))?;
+                    .map_err(|e| stage(crate::FileStage::Cleanup, e))?;
                 fs.sync_directory(&resolved)
-                    .map_err(|e| stage("directory sync", e))?;
+                    .map_err(|e| stage(crate::FileStage::DirectorySync, e))?;
             }
         }
         Ok(Self {

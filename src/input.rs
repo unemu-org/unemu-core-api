@@ -17,20 +17,24 @@ use crate::DisplayId;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InputEvent {
     /// A key of a keyboard port, by physical position.
+    #[non_exhaustive]
     Key {
         port: PortId,
         key: Key,
         state: KeyState,
     },
     /// Relative pointer movement in device counts, positive `dy` up.
+    #[non_exhaustive]
     PointerMotion { port: PortId, dx: i32, dy: i32 },
     /// A pointer button, numbered from 0: left, right, middle.
+    #[non_exhaustive]
     PointerButton {
         port: PortId,
         button: u8,
         pressed: bool,
     },
     /// A control of a game pad.
+    #[non_exhaustive]
     Pad {
         port: PortId,
         control: PadControl,
@@ -53,6 +57,7 @@ pub enum InputEvent {
     /// buttons are [`InputEvent::PointerButton`] events. What the device
     /// senses there (the beam's time, the brightness under the gun) is the
     /// core's business.
+    #[non_exhaustive]
     PointerPosition {
         port: PortId,
         position: Option<(u16, u16)>,
@@ -72,6 +77,7 @@ pub const fn pointer_pixel(position: (u16, u16), width: u32, height: u32) -> (u3
 /// A key by its position: the usage id of the USB HID keyboard page (USB
 /// HID Usage Tables, Keyboard/Keypad Page 0x07), such as `0x04` for the key
 /// marked A on a US keyboard.
+/// Deliberately closed scalar representation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Key(pub u16);
 
@@ -293,11 +299,13 @@ pub enum InputKind {
     Keyboard,
     /// A mouse or similar; the front end offers pointer capture when a
     /// machine has one.
+    #[non_exhaustive]
     RelativePointer {
         buttons: u8,
     },
     /// A game pad with these controls. The ports of this kind are the
     /// players, first to last, in ascending [`PortId`].
+    #[non_exhaustive]
     Pad {
         controls: Vec<PadControl>,
     },
@@ -305,6 +313,7 @@ pub enum InputKind {
     /// light pen, a touch screen. The front end sends where the host
     /// pointer is over that display's picture
     /// ([`InputEvent::PointerPosition`]) and does not capture it.
+    #[non_exhaustive]
     AbsolutePointer {
         display: DisplayId,
         buttons: u8,
@@ -312,5 +321,52 @@ pub enum InputKind {
 }
 
 /// An input port of a machine, by the number its description gives it.
+/// Deliberately closed scalar representation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PortId(pub u8);
+
+impl InputEvent {
+    /// A physical keyboard event.
+    pub const fn key(port: PortId, key: Key, state: KeyState) -> Self {
+        Self::Key { port, key, state }
+    }
+    /// Relative pointer movement in device counts.
+    pub const fn pointer_motion(port: PortId, dx: i32, dy: i32) -> Self {
+        Self::PointerMotion { port, dx, dy }
+    }
+    /// A pointer button event.
+    pub const fn pointer_button(port: PortId, button: u8, pressed: bool) -> Self {
+        Self::PointerButton {
+            port,
+            button,
+            pressed,
+        }
+    }
+    /// A pad control event.
+    pub const fn pad(port: PortId, control: PadControl, pressed: bool) -> Self {
+        Self::Pad {
+            port,
+            control,
+            pressed,
+        }
+    }
+    /// An absolute pointer position, or off-picture.
+    pub const fn pointer_position(port: PortId, position: Option<(u16, u16)>) -> Self {
+        Self::PointerPosition { port, position }
+    }
+}
+
+impl InputKind {
+    /// A relative pointer with this many buttons.
+    pub const fn relative_pointer(buttons: u8) -> Self {
+        Self::RelativePointer { buttons }
+    }
+    /// A pad with these controls.
+    pub const fn pad(controls: Vec<PadControl>) -> Self {
+        Self::Pad { controls }
+    }
+    /// An absolute pointer on this display.
+    pub const fn absolute_pointer(display: DisplayId, buttons: u8) -> Self {
+        Self::AbsolutePointer { display, buttons }
+    }
+}

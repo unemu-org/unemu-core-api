@@ -9,6 +9,8 @@
 //! write, a failed sync and both kinds of failed commit. [`MemoryContent`]
 //! fails a read on request and can stop being the verified bytes.
 
+//! [`ScriptedMachine`] models machine calls, statuses, media and saved state.
+
 use crate::{is_record_name, ContentReader, Error, ErrorKind, Record, Replacement, Storage};
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
@@ -477,3 +479,6 @@ impl ContentReader for MemoryContent {
         read_into(&self.bytes, offset, buf)
     }
 }
+
+mod machine;
+pub use machine::ScriptedMachine;

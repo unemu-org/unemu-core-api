@@ -38,7 +38,7 @@ mod storage;
 pub use crate::content::FileContent;
 pub use crate::host::{FileIo, Filesystem, HostFilesystem};
 pub use crate::names::{file_name, record_name};
-pub use crate::path::{is_temporary_path, FileError, PathLock};
+pub use crate::path::{is_temporary_path, FileError, FileStage, PathLock};
 pub use crate::storage::{FileRecord, FileStorage};
 
 #[cfg(test)]

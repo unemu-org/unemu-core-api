@@ -32,8 +32,8 @@ pub trait ContentReader {
     /// longer the verified ones, such as when the file behind the object
     /// changed; a core must not rely on detection. Fails with
     /// [`crate::ErrorKind::Storage`] when the host read failed. The guest
-    /// sees neither: the core reports the failure at the next run boundary
-    /// ([`crate::Machine::run`]).
+    /// sees neither: the core reports the failure from the call doing the I/O
+    /// (for example [`crate::Machine::run`] or [`crate::Machine::change_medium`]).
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), Error>;
 }
 

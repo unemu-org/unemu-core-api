@@ -7,6 +7,7 @@
 /// `major` changes when a core or a front end has to be edited to keep
 /// working. `minor` changes when something is added: a method with a default
 /// body, a field, an enum variant. While `major` is 0 every minor may break.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ContractVersion {
     pub major: u16,

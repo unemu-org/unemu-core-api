@@ -7,7 +7,7 @@ SemVer requirements are planned for 1.0, not this release. From 0.4, see the
 [0.4 migration index](migration-0.4.md) first).
 
 ```toml
-unemu-core-api = { version = "0.6", git = "https://github.com/unemu-org/unemu-core-api", rev = "<commit of the release>" }
+unemu-core-api = { version = "0.6", git = "https://github.com/unemu-org/unemu-core-api", rev = "a4ec90098e7ca0bc7ce60b2d20af43f140eb3960" }
 ```
 
 - An exact revision, never a branch and never a tag name: a tag can be
@@ -39,7 +39,7 @@ crate of this repository, is those objects over host files:
   by the same URL and revision as the contract:
 
   ```toml
-  unemu-core-files = { version = "0.6", git = "https://github.com/unemu-org/unemu-core-api", rev = "<commit of the release>" }
+  unemu-core-files = { version = "0.6", git = "https://github.com/unemu-org/unemu-core-api", rev = "a4ec90098e7ca0bc7ce60b2d20af43f140eb3960" }
   ```
 
 - **Who never links it:** a core library. A core takes the objects the

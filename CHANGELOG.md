@@ -7,7 +7,7 @@ or **added**. Every release names the commit a consumer pins
 
 ## 0.6.0 — 2026-11-24 — contract 0.6
 
-Commit to pin: `<commit of the release>`
+Commit to pin: `a4ec90098e7ca0bc7ce60b2d20af43f140eb3960`
 
 Contract 0.6 adds explicit content bindings
 ([decision](docs/decisions/0002-content-bindings.md)): a config names a

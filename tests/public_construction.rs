@@ -244,3 +244,57 @@ fn public_requests_and_opaque_test_helpers_are_constructible() {
     let _ = ScriptedMachine::new(Rc::new(storage)).without_initial_picture();
     let _ = Operation::Open;
 }
+
+#[test]
+fn binding_data_has_public_constructors_and_extensible_patterns() {
+    const PLATFORM: PlatformDescription =
+        PlatformDescription::new("bound", "Bound").with_content_bindings(true);
+    const _: () = assert!(PLATFORM.content_bindings);
+    let slot = BindingSlot::new("slot", "package", "item", BindingKind::FirmwareRom)
+        .with_role("system")
+        .with_size(3)
+        .with_sha256([1; 32]);
+    let BindingSlot { id, role, .. } = slot;
+    assert_eq!(id, "slot");
+    assert_eq!(role.as_deref(), Some("system"));
+    let zero = BindingSlot::zero_disk("empty", "system", 4096);
+    assert_eq!(zero.use_id, None);
+    assert_eq!(zero.item_id.as_deref(), Some("system"));
+    assert_eq!(zero.size, Some(4096));
+    let item = BindingItem::new("item", BindingKind::FirmwareRom, 3, [1; 32])
+        .with_roles(vec!["system".into()]);
+    let uses = [BindingUse::new("package", "opaque-manifest", vec![item])];
+    struct NoContent;
+    impl ContentSource for NoContent {
+        fn open(&self, _: &[u8; 32], _: u64) -> Result<Content, Error> {
+            Err(Error::new(ErrorKind::Content, "no content"))
+        }
+    }
+    let facts = BindingFacts::new(&uses, &NoContent);
+    let BindingFacts { uses, content, .. } = facts;
+    let BindingUse {
+        manifest_digest,
+        items,
+        ..
+    } = &uses[0];
+    let BindingItem { roles, kind, .. } = &items[0];
+    assert_eq!(manifest_digest, "opaque-manifest");
+    assert_eq!(roles, &["system"]);
+    let name = match kind {
+        BindingKind::FirmwareRom => "firmware",
+        BindingKind::Medium => "medium",
+        BindingKind::ZeroDisk => "zero",
+        _ => "unknown",
+    };
+    assert_eq!(name, "firmware");
+    assert!(content.open(&[1; 32], 3).is_err());
+    let prepared = PreparedConfig::new(
+        ConfigDocumentBuf::new("text/plain", Vec::new()),
+        Validated::new(Vec::new()),
+    );
+    let PreparedConfig {
+        config, validated, ..
+    } = prepared;
+    assert!(config.bytes.is_empty());
+    assert!(validated.content.is_empty());
+}

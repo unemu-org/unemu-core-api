@@ -49,6 +49,7 @@
 
 #![forbid(unsafe_code)]
 
+mod binding;
 mod content;
 mod control;
 mod core;
@@ -64,6 +65,9 @@ mod version;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
+pub use crate::binding::{
+    BindingFacts, BindingItem, BindingKind, BindingSlot, BindingUse, PreparedConfig,
+};
 pub use crate::content::{ContentKind, ContentRef, Identified, OfferedContent, Validated};
 pub use crate::control::{Finished, ResetKind};
 pub use crate::core::{
@@ -98,6 +102,9 @@ const _: () = {
     const fn assert_send<T: Send>() {}
     assert_send::<Identified>();
     assert_send::<Validated>();
+    assert_send::<PreparedConfig>();
+    assert_send::<BindingSlot>();
+    assert_send::<BindingUse>();
     assert_send::<MediaDescription>();
     assert_send::<ExportReport>();
     assert_send::<ConfigDocumentBuf>();

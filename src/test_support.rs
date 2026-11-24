@@ -549,3 +549,6 @@ pub use machine::ScriptedMachine;
 
 mod export;
 pub use export::{ExportOperation, MemoryExportSink, ScriptedCore};
+
+mod binding;
+pub use binding::{check_prepared, ScriptedBindingCore};

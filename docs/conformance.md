@@ -3,12 +3,12 @@
 The documentation comments say what each call must do. This list is what
 they cannot say about a core as a whole. It is the checklist a new core,
 and every change to a core, is reviewed against. It is the list of
-contract 0.4, with additive offline operations for 0.5.
+contract 0.4, with additive offline operations for 0.5 and bindings for 0.6.
 
 1. **The dependency.** The crate by the exact revision of a release tag
    ([`embedding.md`](embedding.md)), never a path, a branch or a copy; a
    gitignored patch for local work. `CoreDescription::implements` is a
-   literal, such as `ContractVersion::new(0, 5)`.
+   literal, such as `ContractVersion::new(0, 6)`.
 2. **The description.** A core id, its platforms, their config types and
    options, its notices. A platform that a person can start from a file
    lists its `ContentKind`s with their extensions, and at least one config
@@ -208,7 +208,7 @@ failure. StorageUncertain is an uncertain write, never flattened to Storage
 or a warning. Method-specific reset rules retain the existing Guest exception.
 
 The allowed kinds below are exhaustive for 0.4 plus the optional 0.5 offline
-operations. An implementation translates its internal errors at the adapter; a core's own invalid parsing read must not
+operations and 0.6 bindings. An implementation translates its internal errors at the adapter; a core's own invalid parsing read must not
 escape as caller Usage. Apply status rejections first, then absent-operation
 Unsupported, then argument checks, as in the call/status matrix. Halted/Off run
 short-circuits remain as specified there. No call below advances virtual time
@@ -221,6 +221,8 @@ state, even for finish; finalization I/O failure instead sets Failed.
 | `Core::identify` | Unsupported, Content, Storage | No retained machine, content or state; a mismatched offered receipt is Content. Foreign bytes return None; recognised unmodelled/damaged images use Unsupported. |
 | `Core::validate` | Config, Unsupported | Config-only check; no state changes or I/O. Unsupported covers unavailable platform/type or config-only unsupported feature. |
 | `Core::describe_media` | Config, Unsupported | Config-only; no I/O, machine creation, state or status changes. Same config-only checks as validate and baseline create. |
+| `Core::binding_slots` | Config, Unsupported | Config-only; no I/O, machine, state, status or time changes. Canonical occurrence slots; absent operation rejected before arguments. |
+| `Core::compose` | Config, Unsupported, Content, Storage | No machine, state, status or time changes; no writes or retained readers/storage. Config/fact consistency checked before content opens; only a complete prepared config is returned. Unsupported includes recognised content the core cannot run (including a damaged image), as for create; Content is reserved for receipt/change failures. |
 | `Core::export_slots` | Config, Usage, Unsupported | Config-only; no I/O, machine creation, state or status changes. Usage for unknown format id; config checks as validate. |
 | `Core::export` | Config, Usage, Unsupported, Content, Storage | No input, machine, status or time changes. May leave partial outputs; front end removes every output it created, never pre-existing outputs. |
 | `ExportSink::create` | Usage, Storage | Invalid or existing names are Usage with no overwrite. I/O may leave a partial newly created output to clean up. |
@@ -364,3 +366,59 @@ gains mandatory work from these additions.
 Consumer steps and the accepted rationale are in
 [migration-0.5.md](migration-0.5.md) and the
 [decision record](decisions/0001-offline-media-and-export.md).
+
+
+## Explicit content bindings (0.6)
+
+PlatformDescription::content_bindings defaults to false. True promises both
+binding_slots and compose for supported configurations. Both methods are
+object-safe and default to Unsupported before arguments. Front ends leave
+preparation unavailable for absent support or unknown kinds. Existing methods
+retain baseline behavior; unresolved templates may need compose before validate.
+
+1. binding_slots performs no I/O and returns every document binding occurrence
+   with a stable unique config-local id, sorted by Rust string ordering. It
+   reports exact use/item ids, kind and explicitly declared role/size/digest
+   constraints. Repeated references have separate occurrence ids. ZeroDisk is
+   document-owned: use_id is None, item_id is the document-declared disk id,
+   unique among the document's zero disks. A recipe's template disk declaration
+   must match by id and size. Size is fixed; no content open or supplied item.
+   Prepared documents have no package slots; zero slots may remain discoverable.
+2. compose rejects unbound/unused uses, duplicate uses, missing/ambiguous item
+   ids, wrong kinds, size/digest conflicts and undeclared roles with Config and
+   useful use/item/slot messages. Names and manifest digests must be nonempty;
+   ids are case-sensitive and item ids unique within a use. Unselected package
+   items are allowed. Roles, including implicit config requirements, must be
+   declared for this item by this bound package, never inferred from a global
+   catalogue or another item/package sharing the digest. The front end verifies
+   packages and faithfully extracts declarations; the core does not authenticate
+   the opaque manifest digest. Geometry versus declared size and path-plus-binding
+   conflicts are core-specific Config checks, never front-end responsibilities.
+3. All consistency checks precede content opens. Full SHA-256 and length are
+   front-end receipts, with no sampling or core rehash. compose opens every
+   required identity, checks reader size and uses ContentSource/ContentReader
+   conventions. Missing/mismatched receipts or detected changes are Content;
+   correctly hashed content the core cannot run (such as an unsupported
+   cartridge mapper) is Unsupported. Recognised malformed content is also
+   Unsupported, exactly as create's damaged-image rule specifies, never Content.
+   I/O is Storage. Internal parsing reads never leak Usage. No base is written,
+   no storage is acquired and no partial result is returned on failure.
+4. Equal config and facts produce identical prepared bytes/content lists
+   independent of use/item/role order. PreparedConfig wraps existing document
+   and validation types; the host-free document contains no unresolved package
+   bindings. validate returns the matching identity set; successful baseline
+   create requests exactly that set through ContentSource. Store this config
+   and its content for replay; provenance may be stored separately. Success
+   cannot promise later content/storage or creation success. Cartridge content
+   fits Medium just as disk media does; roles and config syntax stay core-owned.
+5. Consumer conformance tests exercise advertised methods through &dyn Core,
+   canonical slots, all Config rejection cases, receipt/I/O failures,
+   content-dependent Unsupported, package-local roles and creation using only
+   the listed identities. test-support supplies
+   ScriptedBindingCore and check_prepared. The helper compares validate's identity
+   set with the result and checks no package slots remain, without creating a
+   machine or doing content I/O. Consumer tests still verify actual create opens
+   and deterministic composition.
+
+See [migration-0.6.md](migration-0.6.md) and the
+[decision record](decisions/0002-content-bindings.md).

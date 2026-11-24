@@ -3,8 +3,8 @@
 //! (core-contract.md §3.3, §3.4, §12.5 and §13.2).
 
 use crate::{
-    ContentKind, ContentReader, ContractVersion, Error, ErrorKind, Identified, Machine,
-    OfferedContent, ResetKind, Storage, Validated,
+    BindingFacts, BindingSlot, ContentKind, ContentReader, ContractVersion, Error, ErrorKind,
+    Identified, Machine, OfferedContent, PreparedConfig, ResetKind, Storage, Validated,
 };
 use crate::{ExportFormat, ExportReport, ExportRequest, ExportSink, MediaDescription, SlotId};
 use std::fmt;
@@ -96,6 +96,83 @@ pub trait Core: Send + Sync {
         Err(Error::new(
             ErrorKind::Unsupported,
             "this core does not validate configs",
+        ))
+    }
+
+    /// List explicit content bindings without I/O (since 0.6).
+    /// Advertised by PlatformDescription::content_bindings, false by default.
+    /// Return one BindingSlot per document occurrence, including zero disks,
+    /// sorted by its unique stable id. The same config gives identical slots.
+    /// An already prepared document has no package bindings; document-owned
+    /// zero disks may still be listed. For ZeroDisk, use_id is None and item_id
+    /// is the document-declared disk id, unique among the document's zero disks.
+    /// A recipe's template disk declaration must match by id and size.
+    /// No machine, state or time changes.
+    ///
+    /// Only Config and Unsupported are allowed, as for describe_media.
+    /// Config-only checks agree with composition and baseline create for the
+    /// resolved document; unresolved bindings need facts before validation can
+    /// succeed. The core checks geometry against declared disk size and rejects
+    /// path-plus-binding conflicts. Success cannot promise creation success.
+    /// Reject absent operations before arguments. Default Unsupported; front
+    /// ends leave recipe preparation unavailable when support is absent and
+    /// never interpret a core's config themselves.
+    fn binding_slots(
+        &self,
+        platform: &str,
+        config: ConfigDocument<'_>,
+    ) -> Result<Vec<BindingSlot>, Error> {
+        let _ = (platform, config);
+        Err(Error::new(
+            ErrorKind::Unsupported,
+            "this core does not describe content bindings",
+        ))
+    }
+
+    /// Resolve package bindings into an existing create/validate document (since 0.6).
+    /// Advertised together with binding_slots by content_bindings. No machine
+    /// is created, no state/status/time changes and no bytes are written.
+    /// Config syntax, lowering and roles are exclusively the core's concern.
+    /// The same config and facts produce identical prepared bytes and content
+    /// lists, independent of facts ordering. No reader or facts are retained.
+    ///
+    /// Reject with Config and useful use/item/slot diagnostics: unbound or
+    /// unused uses, duplicate use ids, missing or ambiguous item ids, wrong
+    /// kinds, size/digest constraints conflicting with facts, and roles not
+    /// declared for that item by that bound package. A role implied by config
+    /// also needs that declaration; never borrow roles from a global catalogue
+    /// or another item/package sharing the digest. Reject invalid fact names
+    /// or empty manifest digests with Config. Extra items in a used package are
+    /// allowed. The core also checks geometry versus declared disk size and
+    /// path-plus-binding conflicts; the front end never implements those checks.
+    /// ZeroDisk consumes no package fact and opens no content.
+    ///
+    /// Check all config/fact consistency before opening content. ContentSource
+    /// supplies bytes by full SHA-256 and size, exactly as for create; trust its
+    /// receipt, never rehash. Open every required identity before success and
+    /// check reader size. Content means missing/mismatched receipts or detected
+    /// changed bytes, Storage means read I/O; internal parsing reads cannot leak
+    /// Usage. Unsupported means absent operation/platform/type or unsupported
+    /// config capability, or recognised content the core cannot run (including
+    /// a damaged image), exactly as create does. Correctly hashed content with
+    /// an unsupported cartridge mapper is Unsupported, not Content. These and
+    /// Config are the only errors; no storage or machine is acquired. Reject
+    /// absent operations before arguments.
+    ///
+    /// The result contains no unresolved package bindings or host references.
+    /// validate accepts it and returns the matching Validated identity set;
+    /// baseline create consumes it using only that content set. Content and
+    /// storage failures can still prevent creation. Default Unsupported.
+    fn compose(
+        &self,
+        platform: &str,
+        config: ConfigDocument<'_>,
+        facts: BindingFacts<'_>,
+    ) -> Result<PreparedConfig, Error> {
+        let _ = (platform, config, facts);
+        Err(Error::new(
+            ErrorKind::Unsupported,
+            "this core does not compose content bindings",
         ))
     }
 
@@ -273,6 +350,10 @@ pub struct PlatformDescription {
     /// A platform that opens content lists at least one config type,
     /// because [`Core::identify`] answers in one.
     pub content: &'static [ContentKind],
+    /// Optional explicit package bindings (since 0.6), false by default.
+    /// True promises both binding_slots and compose for supported configs.
+    /// Front ends leave preparation unavailable when false or unfamiliar.
+    pub content_bindings: bool,
     /// Optional offline formats (since 0.5), empty by default. Ids are unique
     /// within this platform and stable across releases. Every advertised format
     /// works for its supported configurations through Core::export.
@@ -291,6 +372,7 @@ impl PlatformDescription {
             options: &[],
             content: &[],
             export_formats: &[],
+            content_bindings: false,
         }
     }
 
@@ -312,6 +394,12 @@ impl PlatformDescription {
     /// The kinds of content a person can open to start a machine.
     pub const fn with_content(mut self, content: &'static [ContentKind]) -> Self {
         self.content = content;
+        self
+    }
+
+    /// Advertise both optional content binding operations.
+    pub const fn with_content_bindings(mut self, supported: bool) -> Self {
+        self.content_bindings = supported;
         self
     }
 

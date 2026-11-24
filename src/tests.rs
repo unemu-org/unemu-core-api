@@ -2467,3 +2467,5 @@ fn advertised_input_controls_queue_in_order_at_run_boundary() {
     assert_eq!(m.applied_input(), &events[1..]);
     assert_eq!((m.now(), m.steps()), (Ticks(0), 0));
 }
+
+mod binding;

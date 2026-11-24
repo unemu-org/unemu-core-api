@@ -5,6 +5,21 @@ or **added**. Every release names the commit a consumer pins
 ([`docs/embedding.md`](docs/embedding.md)); the version rules are in
 [`docs/versioning.md`](docs/versioning.md).
 
+## Unreleased — intended contract 0.6
+
+- **added** Optional Core::binding_slots and Core::compose, advertised together
+  by PlatformDescription::content_bindings (false by default). Both methods
+  default to Unsupported before checking arguments. Package-local item facts,
+  kinds and roles resolve to a host-free digest-addressed ConfigDocumentBuf
+  and matching Validated list in PreparedConfig, consumed by ordinary create.
+  ContentSource supplies verified full SHA-256/size receipts without core rehash.
+- **added** Canonical occurrence slots, document-owned zero disks identified
+  by declared disk id and size, Config diagnostics for inconsistent package
+  bindings and package-local role checks.
+  ScriptedBindingCore and check_prepared support front-end tests. Accepted
+  [decision](docs/decisions/0002-content-bindings.md),
+  [migration](docs/migration-0.6.md) and conformance rules describe the seam.
+
 ## 0.5.0 — 2026-11-23 — contract 0.5
 
 Commit to pin: `316dd2a1f429cc3ef37a2bed203e89b2160079ff`

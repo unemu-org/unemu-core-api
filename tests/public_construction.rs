@@ -2,7 +2,7 @@
 //! Downstream construction and matching: this module has no crate-private access.
 use unemu_core_api::*;
 
-const VERSION: ContractVersion = ContractVersion::new(0, 5);
+const VERSION: ContractVersion = ContractVersion::new(0, 6);
 const RATE: Rate = Rate::new(8_000, 1);
 const AREA: FrameArea = FrameArea::new(0, 0, 1, 1);
 const KIND: ContentKind = ContentKind::new("raw", "Image", &["img"]);

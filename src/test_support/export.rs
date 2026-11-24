@@ -148,7 +148,7 @@ impl ExportOutput for Output {
 pub struct ScriptedCore;
 
 const DESCRIPTION: CoreDescription = CoreDescription::new(
-    ContractVersion::new(0, 5),
+    ContractVersion::new(0, 6),
     "scripted",
     "Scripted core",
     "1.0.0",

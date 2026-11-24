@@ -19,7 +19,7 @@ pub struct ContractVersion {
 /// A core names the version it was written against with a literal in
 /// [`crate::CoreDescription::implements`], never with this constant: the
 /// constant follows whichever copy of the crate Cargo resolved.
-pub const CONTRACT: ContractVersion = ContractVersion { major: 0, minor: 5 };
+pub const CONTRACT: ContractVersion = ContractVersion { major: 0, minor: 6 };
 
 impl ContractVersion {
     /// A version from its two numbers.

@@ -10,7 +10,7 @@ use unemu_core_api::*;
 
 const DIGEST: [u8; 32] = [7; 32];
 const DESCRIPTION: CoreDescription = CoreDescription::new(
-    ContractVersion::new(0, 5),
+    ContractVersion::new(0, 6),
     "baseline",
     "Baseline core",
     "1.0.0",

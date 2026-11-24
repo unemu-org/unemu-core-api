@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 const TEMPLATE: &str = "application/x-scripted-bindings";
 const PREPARED: &str = "application/x-scripted-prepared";
 const DESCRIPTION: CoreDescription = CoreDescription::new(
-    ContractVersion::new(0, 5),
+    ContractVersion::new(0, 6),
     "scripted-bindings",
     "Scripted bindings",
     "1.0.0",

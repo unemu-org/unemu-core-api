@@ -1,9 +1,8 @@
 # Moving to contract 0.6
 
-This is an additive, optional API change on top of 0.5. CONTRACT, package
-versions and release pins remain at 0.5 until release preparation.
-Do not pin this development branch. When 0.6 is released, coordinate exact
-git revisions throughout the build as described in [embedding](embedding.md).
+This is an additive, optional API change on top of 0.5, released as 0.6.0.
+Coordinate exact git revisions throughout the build as described in
+[embedding](embedding.md).
 
 ## Cores
 

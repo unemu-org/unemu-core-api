@@ -549,7 +549,7 @@ struct SubsetCore;
 impl Core for SubsetCore {
     fn description(&self) -> &CoreDescription {
         const DESCRIPTION: CoreDescription =
-            CoreDescription::new(ContractVersion::new(0, 5), "subset", "Subset core", "1.0.0")
+            CoreDescription::new(ContractVersion::new(0, 6), "subset", "Subset core", "1.0.0")
                 .with_platforms(&[PlatformDescription::new("subset", "Subset")
                     .with_export_formats(&[
                         ExportFormat::new("pair", "Pair", "txt", ExportScope::Machine),

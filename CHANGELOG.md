@@ -5,7 +5,16 @@ or **added**. Every release names the commit a consumer pins
 ([`docs/embedding.md`](docs/embedding.md)); the version rules are in
 [`docs/versioning.md`](docs/versioning.md).
 
-## Unreleased — intended contract 0.6
+## 0.6.0 — 2026-11-24 — contract 0.6
+
+Commit to pin: `<commit of the release>`
+
+Contract 0.6 adds explicit content bindings
+([decision](docs/decisions/0002-content-bindings.md)): a config names a
+package use and an item in it, the core lists the bindings and composes the
+document with front-end supplied package facts into a digest-addressed
+prepared config. Both operations are optional and answer Unsupported by
+default; a 0.5 core only states 0.6.
 
 - **added** Optional Core::binding_slots and Core::compose, advertised together
   by PlatformDescription::content_bindings (false by default). Both methods
